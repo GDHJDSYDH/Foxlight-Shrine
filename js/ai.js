@@ -86,27 +86,33 @@ class ShizuneAI {
     this.spottedInCoverCount = 0;
   }
 
-  // 强光爆闪命中处理（严格受障碍物遮挡，无法穿墙命中，但可命中正躲在被照射掩体处的雫音）
-  hitByFlashBurst(player, sound, onEvent, effectiveRange) {
-    const dx = this.x - player.x;
-    const dy = this.y - player.y;
-    const dist = Math.hypot(dx, dy);
-    const maxRange = (effectiveRange || player.lightRange) * 1.42;
-    if (dist > maxRange) return false;
+  // 强光爆闪命中处理（使用与画面光束一致的快照出光点/朝向/射程，并用扫掠击退杜绝穿墙！）
+  hitByFlashBurst(player, sound, onEvent, burstSnapshot) {
+    const ox = burstSnapshot ? burstSnapshot.x : player.x;
+    const oy = burstSnapshot ? burstSnapshot.y : player.y;
+    const aimAngle = burstSnapshot ? burstSnapshot.angle : player.aimAngle;
+    const maxRange = burstSnapshot ? burstSnapshot.range : player.lightRange * 1.42;
+    const halfFov = burstSnapshot ? burstSnapshot.halfFov : player.lightHalfFov * 1.45;
 
-    // 极近距离（< 42px）无视微小角度偏差直接判定爆闪命中，避免贴脸爆闪反而失效
-    if (dist > 42) {
+    const dx = this.x - ox;
+    const dy = this.y - oy;
+    const dist = Math.hypot(dx, dy);
+    const distCenter = Math.hypot(this.x - player.x, this.y - player.y);
+    if (dist > maxRange && distCenter > maxRange) return false;
+
+    // 极近距离（< 46px）放宽角度判定，防止贴脸爆闪落空
+    if (distCenter > 46) {
       const angleTo = Math.atan2(dy, dx);
-      const diff = Math.atan2(Math.sin(angleTo - player.aimAngle), Math.cos(angleTo - player.aimAngle));
-      if (Math.abs(diff) > player.lightHalfFov * 1.45) return false;
+      const diff = Math.atan2(Math.sin(angleTo - aimAngle), Math.cos(angleTo - aimAngle));
+      if (Math.abs(diff) > halfFov) return false;
     }
 
-    // 严格视线检查：绝不穿墙！仅当玩家直线可见雫音，或雫音正躲在该掩体且玩家与掩体间无其它阻挡时才生效
-    let hit = this.map.hasLineOfSight(player.x, player.y, this.x, this.y, null);
+    // 严格视线检查：绝不穿墙！仅当直线可见雫音，或雫音正躲在该掩体且玩家与掩体间无其它阻挡时才生效
+    let hit = this.map.hasLineOfSight(ox, oy, this.x, this.y, null);
     if (!hit && this.state === "hiding" && this.hidingObstacle) {
       hit = this.map.hasLineOfSight(
-        player.x,
-        player.y,
+        ox,
+        oy,
         this.hidingObstacle.cx,
         this.hidingObstacle.cy,
         this.hidingObstacle
@@ -121,11 +127,9 @@ class ShizuneAI {
     this.path = [];
     this.repelCount += 1;
 
-    // 柔和击退（防止贴脸时 dist≈0 导致除零或弹出边界）
-    const pushAngle = dist > 1 ? Math.atan2(dy, dx) : player.aimAngle;
-    this.x += Math.cos(pushAngle) * 48;
-    this.y += Math.sin(pushAngle) * 48;
-    this.map.resolveCircleCollisions(this);
+    // 分段扫掠击退，撞到第一面墙或屏风就停下，彻底杜绝把雫音推穿墙体！
+    const pushAngle = distCenter > 1 ? Math.atan2(this.y - player.y, this.x - player.x) : aimAngle;
+    this.map.moveEntitySwept(this, Math.cos(pushAngle) * 52, Math.sin(pushAngle) * 52, 6);
 
     sound.playFoxRetreat();
     if (onEvent) onEvent("stunned", "强光命中！雫音捂眼眩晕了！");
@@ -181,13 +185,17 @@ class ShizuneAI {
     const pan = Math.max(-1, Math.min(1, (this.x - player.x) / 520));
     const effectiveRange = gameState.effectiveLightRange || player.lightRange;
 
-    // 严格检查手电筒照射（不可穿墙！先检查直线视线）
+    // 记录帧初状态（防止撤退结束的同一帧立刻把玩家判负！）
+    const startedInRetreat = this.state === "retreat";
+
+    // 与渲染层共享完全一致的出光原点进行照射检测（近距离贴脸也不会出现“画面照着却判定没照到”）
     let lit = false;
     let coverSpotted = false;
+    const beamOrigin = lighting.getFlashlightOrigin(player, this.map);
     if (player.lightOn && player.battery > 0.1) {
       const check = lighting.isPointInFlashlight(
-        player.x,
-        player.y,
+        beamOrigin.x,
+        beamOrigin.y,
         player.aimAngle,
         player.lightHalfFov,
         effectiveRange,
@@ -198,11 +206,20 @@ class ShizuneAI {
       );
       lit = check.lit;
 
+      // 兼容极近距离（与出光点重合或贴身 < 54px）仍被正面光束照射
+      if (!lit && distToPlayer < 54 && this.map.hasLineOfSight(player.x, player.y, this.x, this.y, null)) {
+        const angCenter = Math.atan2(this.y - player.y, this.x - player.x);
+        const diffCenter = Math.atan2(Math.sin(angCenter - player.aimAngle), Math.cos(angCenter - player.aimAngle));
+        if (Math.abs(diffCenter) <= player.lightHalfFov + 0.18) {
+          lit = true;
+        }
+      }
+
       // 躲在掩体后时：玩家必须先直线照亮该掩体本身（且无其它墙壁挡着），才可识破露出的狐尾
       if (!lit && this.state === "hiding" && this.hidingObstacle) {
         const obsCheck = lighting.isPointInFlashlight(
-          player.x,
-          player.y,
+          beamOrigin.x,
+          beamOrigin.y,
           player.aimAngle,
           player.lightHalfFov,
           effectiveRange * 0.94,
@@ -401,11 +418,12 @@ class ShizuneAI {
         }
       }
     } else if (this.state === "ambush") {
-      // 高速突袭扑击：关灯期间残影更密集、追击范围更大、冷却更短！
+      // 高速突袭扑击：正面持续被手电强照时速度明显受抑，给玩家反应和驱散窗口！
       if (this.afterimages.length < 10) {
         this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.65 });
       }
-      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * (lit ? 0.72 : 1.0);
+      const litSlow = lit ? (this.litExposure > 0.35 ? 0.36 : 0.58) : 1.0;
+      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * litSlow;
       this._navigateTo(player.x, player.y, speed, dt, null, 0.18);
 
       const maxChaseDist = isLightOff ? 640 : 500;
@@ -448,15 +466,23 @@ class ShizuneAI {
       this.lastCheckPos.y = this.y;
     }
 
-    // 若在极近距离正被手电筒持续照射（lit && litExposure > 0.35），稍微延长判定容忍避免“明明已经照到了却瞬间死掉”
-    // 同时防止在被驱散同一帧误触捕获
-    const catchDist = player.radius + this.radius - 4;
+    // 移动与脱困结束后，用最新坐标重新计算与主角的真实距离！
+    const finalDistToPlayer = Math.hypot(player.x - this.x, player.y - this.y);
+
+    // 持续直照保护（防止玩家正死死照着她、曝光条快满时却突然瞬杀结算）：
+    // 1. 撤退刚结束的那一帧不判定捕获（从下一帧恢复）
+    // 2. 若正在被手电直照且曝光已超过 0.35，将判定半径收紧且优先推开一点压迫距离，确保直照能稳定驱散
+    const baseCatchDist = player.radius + this.radius - 4;
+    const directLightProtected = lit && this.litExposure >= 0.35;
+    const effectiveCatchDist = directLightProtected ? Math.max(18, baseCatchDist - 11) : baseCatchDist;
+
     const caught =
+      !startedInRetreat &&
       this.state !== "retreat" &&
       this.state !== "stunned" &&
-      distToPlayer < catchDist;
+      finalDistToPlayer < effectiveCatchDist;
 
-    return { caught, distToPlayer };
+    return { caught, distToPlayer: finalDistToPlayer };
   }
 
   // 基于 A* 路径的丝滑导航移动
@@ -483,7 +509,9 @@ class ShizuneAI {
     if (dist < 2) return;
 
     const desiredAngle = Math.atan2(dy, dx);
-    this._stepWithAvoidance(desiredAngle, speed, dt);
+    // 将本帧步长限制为不超过到路点的剩余距离，避免绕路点来回过冲抖动
+    const clampedSpeed = Math.min(speed, dist / Math.max(0.001, dt));
+    this._stepWithAvoidance(desiredAngle, clampedSpeed, dt);
   }
 
   // 单步推进 + 局部多角度探测防擦墙停滞
@@ -554,13 +582,15 @@ class ShizuneAI {
     this.path = [];
     this.pathRecalcTimer = 0;
 
-    // 若原本正在找掩体被卡住，直接换方向继续潜行
+    // 若原本正在找掩体被卡住，直接换方向继续潜行；撤退中脱困则保留剩余撤退计时不无限重置
     if (this.state === "seek_cover") {
       this.hidingObstacle = null;
       this.state = "stalk";
       this.flankSide = -this.flankSide;
     } else if (this.state === "retreat") {
+      const remain = this.stateTimer;
       this._enterRetreat(player, false);
+      this.stateTimer = Math.min(remain, this.stateTimer);
     }
   }
 

@@ -245,13 +245,28 @@ class SoundEngine {
     } catch (_e) {}
   }
 
-  // 雫音被照退/识破时的魅惑狐鸣轻响（兼容 Safari/iOS WebAudio 顺序 Ramp，绝不触发非法调度）
+  _safeStopAndDisconnect(nodes) {
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (!n) continue;
+      try {
+        if (typeof n.stop === "function") n.stop();
+      } catch (_e) {}
+      try {
+        if (typeof n.disconnect === "function") n.disconnect();
+      } catch (_e) {}
+    }
+  }
+
+  // 雫音被照退/识破时的魅惑狐鸣轻响（兼容 Safari/iOS WebAudio 顺序 Ramp，出错时立刻释放节点）
   playFoxRetreat() {
     if (!this._canPlay()) return;
+    let osc = null;
+    let gain = null;
     try {
       const now = this.ctx.currentTime;
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
+      osc = this.ctx.createOscillator();
+      gain = this.ctx.createGain();
       osc.type = "sine";
       osc.frequency.setValueAtTime(780, now);
       osc.frequency.linearRampToValueAtTime(1180, now + 0.12);
@@ -266,7 +281,9 @@ class SoundEngine {
       this._autoCleanup(osc, [osc, gain]);
       osc.start(now);
       osc.stop(now + 0.42);
-    } catch (_e) {}
+    } catch (_e) {
+      this._safeStopAndDisconnect([osc, gain]);
+    }
   }
 
   // 突袭预警音

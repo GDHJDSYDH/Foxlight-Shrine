@@ -48,7 +48,8 @@
       this.input = new InputController(this.canvas, {
         onFlash: () => this.triggerFlashBurst(),
         onToggleLight: () => this.toggleFlashlight(),
-        onPause: () => this.togglePause()
+        onPause: () => this.togglePause(),
+        isPlaying: () => this.mode === "playing"
       });
 
       // 图片资源预加载
@@ -114,9 +115,13 @@
       this.particles = [];
       this.batteryRespawnTimer = 0;
       this.flashBurstTimer = 0;
+      this.burstSnapshot = null;
       this.flashCooldown = 0;
       this.screenShake = 0;
       this.toastTimer = 0;
+      this.consecutiveErrors = 0;
+      this._contextLost = false;
+      this._renderDpr = 1;
 
       // 相机（平滑跟随熊太）
       this.camX = 0;
@@ -137,6 +142,7 @@
       this._lastHudAlertText = "";
 
       this._bindUIEvents();
+      this._bindCanvasContextRecovery();
       this._handleResize();
       window.addEventListener("resize", () => this._handleResize());
       document.addEventListener("visibilitychange", () => {
@@ -211,16 +217,47 @@
       document.getElementById("pcToggleSkill").addEventListener("click", () => this.toggleFlashlight());
     }
 
-    _handleResize() {
+    _bindCanvasContextRecovery() {
+      const onLost = (e) => {
+        if (e && e.preventDefault) e.preventDefault();
+        this._contextLost = true;
+      };
+      const onRestored = () => {
+        this._contextLost = false;
+        if (this.groundImg.complete && this.groundImg.naturalWidth > 0) {
+          this.groundPattern = this.ctx.createPattern(this.groundImg, "repeat");
+        }
+        this._handleResize(true);
+      };
+      this.canvas.addEventListener("contextlost", onLost);
+      this.canvas.addEventListener("contextrestored", onRestored);
+      this.lighting.maskCanvas.addEventListener("contextlost", onLost);
+      this.lighting.maskCanvas.addEventListener("contextrestored", onRestored);
+    }
+
+    _handleResize(forceRealloc = false) {
       this.viewW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 360);
       this.viewH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 640);
       this.isMobilePerf = this.input.isTouchDevice || this.viewW <= 820;
-      // 移动端限制 DPR 上限 1.25（桌面端 1.75），避免高刷高分手机 Canvas 显存超限导致卡顿或直接崩溃退出
-      const maxDpr = this.isMobilePerf ? 1.25 : 1.75;
-      const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
-      this.canvas.width = Math.max(1, Math.floor(this.viewW * dpr));
-      this.canvas.height = Math.max(1, Math.floor(this.viewH * dpr));
-      this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      // 按总像素上限动态约束物理分辨率，避免 4K / 高分屏桌面显存暴涨引发 GPU 重置或浏览器崩溃
+      const rawDpr = Math.min(window.devicePixelRatio || 1, this.isMobilePerf ? 1.25 : 1.5);
+      const maxPixels = this.isMobilePerf ? 900000 : 2600000;
+      const rawW = this.viewW * rawDpr;
+      const rawH = this.viewH * rawDpr;
+      const shrink = rawW * rawH > maxPixels ? Math.sqrt(maxPixels / (rawW * rawH)) : 1;
+      const effDpr = rawDpr * shrink;
+
+      const targetW = Math.max(1, Math.min(2560, Math.floor(this.viewW * effDpr)));
+      const targetH = Math.max(1, Math.min(1600, Math.floor(this.viewH * effDpr)));
+
+      if (forceRealloc || this.canvas.width !== targetW || this.canvas.height !== targetH) {
+        this.canvas.width = targetW;
+        this.canvas.height = targetH;
+      }
+      this._renderDprX = targetW / this.viewW;
+      this._renderDprY = targetH / this.viewH;
+      this.ctx.setTransform(this._renderDprX, 0, 0, this._renderDprY, 0, 0);
       this.lighting.resize(this.viewW, this.viewH, this.isMobilePerf);
 
       // 根据设备自动显示或隐藏移动端摇杆（游戏中生效）
@@ -239,8 +276,10 @@
       this.batteriesCollected = 0;
       this.flashUsedCount = 0;
       this.flashBurstTimer = 0;
+      this.burstSnapshot = null;
       this.flashCooldown = 0;
       this.screenShake = 0;
+      this.consecutiveErrors = 0;
 
       this.player = this._createInitialPlayer();
       this.shizune.reset(this.player.x, this.player.y, this.cfg);
@@ -315,8 +354,37 @@
         return;
       }
 
+      // 爆闪触发瞬间立即采样当前输入朝向，并冻结爆闪光束快照，确保命中判定与视觉光束 100% 重合！
+      const move = this.input.getMoveVector();
+      const instantAim = this.input.getAimAngle(
+        this.player.x,
+        this.player.y,
+        this.camX,
+        this.camY,
+        this.player.aimAngle,
+        move
+      );
+      if (Number.isFinite(instantAim)) {
+        this.player.aimAngle = Math.atan2(Math.sin(instantAim), Math.cos(instantAim));
+      }
+
       this.player.battery = Math.max(0, this.player.battery - this.cfg.flashCost);
-      this.player.lightOn = true;
+      // 修正：只有扣完爆闪电量后仍有余电才保持常亮开启，避免电量为 0 时 HUD 显示开启但 AI 按关灯处理
+      this.player.lightOn = this.player.battery > 0.1;
+      if (!this.player.lightOn) {
+        this.showToast("爆闪耗尽最后电量！快寻找发光电池！", true);
+      }
+
+      const effectiveRange = this.player.lightRange * (1 - this.inFogFactor * 0.34);
+      const origin = this.lighting.getFlashlightOrigin(this.player, this.map);
+      this.burstSnapshot = {
+        x: origin.x,
+        y: origin.y,
+        angle: this.player.aimAngle,
+        range: Math.max(24, effectiveRange * 1.42),
+        halfFov: this.player.lightHalfFov * 1.45
+      };
+
       this.flashBurstTimer = 0.42;
       this.flashCooldown = 5.0;
       this.screenShake = 9;
@@ -326,11 +394,11 @@
 
       // 爆闪火花粒子
       for (let i = 0; i < 18; i++) {
-        const a = this.player.aimAngle + (Math.random() - 0.5) * 1.1;
+        const a = this.burstSnapshot.angle + (Math.random() - 0.5) * 1.1;
         const spd = 160 + Math.random() * 260;
         this.particles.push({
-          x: this.player.x + Math.cos(this.player.aimAngle) * 16,
-          y: this.player.y + Math.sin(this.player.aimAngle) * 16,
+          x: origin.x,
+          y: origin.y,
           vx: Math.cos(a) * spd,
           vy: Math.sin(a) * spd,
           life: 0.32 + Math.random() * 0.25,
@@ -340,14 +408,13 @@
         });
       }
 
-      const effectiveRange = this.player.lightRange * (1 - this.inFogFactor * 0.34);
       this.shizune.hitByFlashBurst(
         this.player,
         this.sound,
         (_type, msg) => {
           this.showToast(msg, false);
         },
-        effectiveRange
+        this.burstSnapshot
       );
     }
 
@@ -437,18 +504,27 @@
       const dt = Math.min(0.05, Math.max(0.001, rawDt));
       this.totalTimeSec += dt;
 
-      // 移动端/低配设备不显示桌面端 hover 动画，同时为脚本加载增加版本号防旧缓存干扰
-      try {
-        if (this.mode === "playing") {
-          this._updatePlaying(dt, ts);
+      if (!this._contextLost) {
+        try {
+          if (this.mode === "playing") {
+            this._updatePlaying(dt, ts);
+            this._render();
+          }
+          // 暂停时保留最后一帧画面，无需空转重绘整屏光影与迷雾
+          this.consecutiveErrors = 0;
+        } catch (err) {
+          this.consecutiveErrors += 1;
+          console.error("[Foxlight] Frame error:", err, {
+            mode: this.mode,
+            player: this.player ? { x: this.player.x, y: this.player.y, bat: this.player.battery } : null,
+            shizune: this.shizune ? { x: this.shizune.x, y: this.shizune.y, state: this.shizune.state } : null
+          });
+          // 若连续异常 5 帧，自动暂停并提示而非在后台无声推进或刷爆状态栈
+          if (this.consecutiveErrors >= 5 && this.mode === "playing") {
+            this.togglePause();
+            this.ui.pauseStats.textContent = "检测到渲染异常已自动暂停，可点击继续或重新开始";
+          }
         }
-        // 非游戏标题界面/结算界面无需持续全屏跑高消耗光影渲染，彻底省电防发烫卡顿
-        if (this.mode === "playing" || this.mode === "paused") {
-          this._render();
-        }
-      } catch (err) {
-        // 捕获单帧异常防止游戏直接死机/闪退，并打印诊断提示便于定位
-        console.error("[Foxlight] Frame error recovered:", err);
       }
 
       requestAnimationFrame((nextTs) => this._loop(nextTs));
@@ -479,7 +555,10 @@
       }
 
       // 冷却与计时器衰减
-      if (this.flashBurstTimer > 0) this.flashBurstTimer = Math.max(0, this.flashBurstTimer - dt);
+      if (this.flashBurstTimer > 0) {
+        this.flashBurstTimer = Math.max(0, this.flashBurstTimer - dt);
+        if (this.flashBurstTimer <= 0) this.burstSnapshot = null;
+      }
       if (this.flashCooldown > 0) this.flashCooldown = Math.max(0, this.flashCooldown - dt);
       if (this.screenShake > 0) this.screenShake = Math.max(0, this.screenShake - dt * 24);
       if (this.toastTimer > 0) {
@@ -523,16 +602,18 @@
       // 4:00后结界雾气微缩手电筒最大射程
       this.player.lightRange = hour >= 4 ? 315 : 345;
 
-      // 2. 手电筒电量消耗
-      if (this.player.lightOn && this.player.battery > 0) {
+      // 2. 手电筒电量消耗（统一有效亮灯判定，防止电量为 0 时 lightOn 仍为 true）
+      if (this.player.lightOn && this.player.battery > 0.1) {
         this.player.battery = Math.max(0, this.player.battery - this.cfg.batteryDrain * dt);
         this.player.lightOffDuration = 0;
-        if (this.player.battery <= 0) {
+        if (this.player.battery <= 0.1) {
+          this.player.battery = 0;
           this.player.lightOn = false;
           this.sound.playClick(false);
           this.showToast("手电筒电量耗尽！快找发光的电池补充电量！", true);
         }
       } else {
+        if (this.player.battery <= 0.1) this.player.lightOn = false;
         this.player.lightOffDuration += dt;
       }
 
@@ -648,15 +729,16 @@
       this.ui.hudBatteryFill.classList.toggle("warn", pct <= 40 && pct > 20);
       this.ui.hudBatteryFill.classList.toggle("danger", pct <= 20);
 
-      // 走入妖雾区域时在状态栏提示
+      // 走入妖雾区域时在状态栏提示（与 AI 统一采用 lightOn && battery > 0.1 有效亮灯条件）
+      const effectiveLightOn = this.player.lightOn && this.player.battery > 0.1;
       if (this.inFogFactor > 0.35) {
-        this.ui.hudLightStatus.textContent = this.player.lightOn ? "手电: 浓雾受阻" : "手电: 关闭(浓雾)";
+        this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 浓雾受阻" : "手电: 关闭(浓雾)";
         this.ui.hudLightStatus.classList.add("off");
       } else {
-        this.ui.hudLightStatus.textContent = this.player.lightOn ? "手电: 开启" : "手电: 关闭";
-        this.ui.hudLightStatus.classList.toggle("off", !this.player.lightOn);
+        this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 开启" : "手电: 关闭";
+        this.ui.hudLightStatus.classList.toggle("off", !effectiveLightOn);
       }
-      this.ui.mobToggleLabel.textContent = this.player.lightOn ? "关灯" : "开灯";
+      this.ui.mobToggleLabel.textContent = effectiveLightOn ? "关灯" : "开灯";
       this.ui.hudBatteryCount.textContent = `${this.batteriesCollected} 颗`;
 
       // 爆闪冷却显示
@@ -707,132 +789,139 @@
 
     _render() {
       const ctx = this.ctx;
+      // 每帧显式复位主画布 DPR 变换矩阵，确保即便上帧异常也不会累积缩放/平移错乱！
+      ctx.setTransform(this._renderDprX || 1, 0, 0, this._renderDprY || 1, 0, 0);
       ctx.save();
-      ctx.clearRect(0, 0, this.viewW, this.viewH);
+      try {
+        ctx.clearRect(0, 0, this.viewW, this.viewH);
 
-      // 画面底色
-      ctx.fillStyle = "#080c18";
-      ctx.fillRect(0, 0, this.viewW, this.viewH);
+        // 画面底色
+        ctx.fillStyle = "#080c18";
+        ctx.fillRect(0, 0, this.viewW, this.viewH);
 
-      // 屏幕震动偏移
-      const shakeX = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
-      const shakeY = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
-      const renderCamX = this.camX + shakeX;
-      const renderCamY = this.camY + shakeY;
+        // 屏幕震动偏移
+        const shakeX = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
+        const shakeY = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
+        const renderCamX = this.camX + shakeX;
+        const renderCamY = this.camY + shakeY;
 
-      ctx.save();
-      ctx.translate(-renderCamX, -renderCamY);
-
-      // 1. 神社石板地面纹理
-      if (this.groundPattern) {
-        ctx.fillStyle = this.groundPattern;
-        ctx.fillRect(0, 0, this.map.width, this.map.height);
-      } else {
-        ctx.fillStyle = "#141b2c";
-        ctx.fillRect(0, 0, this.map.width, this.map.height);
-      }
-
-      // 2. 绘制电池道具
-      this._drawBatteries(ctx);
-
-      // 3. 绘制假狐火
-      this._drawDecoyFires(ctx);
-
-      // 4. 绘制男主角「三谷 熊太」
-      this._drawPlayer(ctx);
-
-      // 5. 绘制女主角「稻荷姬 雫音」
-      this.shizune.draw(ctx, this.totalTimeSec);
-
-      // 6. 绘制神社障碍掩体（带视口剔除，提升手机帧率）
-      const hidingId = this.shizune.state === "hiding" && this.shizune.hidingObstacle ? this.shizune.hidingObstacle.id : null;
-      this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, this.viewW, this.viewH);
-
-      // 7. 绘制粒子特效
-      for (const p of this.particles) {
         ctx.save();
-        ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
-        ctx.fillStyle = p.color;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
+        try {
+          ctx.translate(-renderCamX, -renderCamY);
 
-      ctx.restore();
-
-      // 8. 实时手电筒动态光影、范围迷雾与黑暗遮罩层
-      const dawnProgress = Math.min(1, this.elapsedSec / this.cfg.durationSec);
-      let flickerFactor = 1.0;
-      if (this.player.battery <= 20 && this.player.battery > 0) {
-        // 低电量忽明忽暗闪烁警告
-        flickerFactor = Math.sin(this.totalTimeSec * 28) > -0.35 ? 0.92 : 0.32;
-      }
-
-      this.lighting.render(ctx, this.viewW, this.viewH, renderCamX, renderCamY, {
-        player: this.player,
-        map: this.map,
-        batteries: this.batteries,
-        shizune: this.shizune,
-        decoyFires: this.decoyFires,
-        fogZones: this.fogZones,
-        flashBurstTimer: this.flashBurstTimer,
-        dawnProgress,
-        flickerFactor,
-        timeSec: this.totalTimeSec,
-        inFogFactor: this.inFogFactor
-      });
-
-      // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、假狐火微光、低电电池指引）
-      ctx.save();
-      ctx.translate(-renderCamX, -renderCamY);
-
-      const distToShizune = Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y);
-      this.shizune.drawDarknessEyes(ctx, this.totalTimeSec, distToShizune, this.player);
-
-      // 假狐火穿透黑夜的幽红微芒
-      for (const df of this.decoyFires) {
-        const g = ctx.createRadialGradient(df.x, df.y, 2, df.x, df.y, 26);
-        g.addColorStop(0, "rgba(255, 224, 150, 0.9)");
-        g.addColorStop(0.5, "rgba(235, 68, 98, 0.55)");
-        g.addColorStop(1, "rgba(235, 68, 98, 0)");
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(df.x, df.y + Math.sin(df.phase) * 5, 26, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // 当电量低于 25% 时，在熊太周围显示指向最近电池的柔和青色小箭头
-      if (this.player.battery <= 25 && this.batteries.length > 0 && this.mode === "playing") {
-        let nearest = this.batteries[0];
-        let minD = Infinity;
-        for (const b of this.batteries) {
-          const d = Math.hypot(b.x - this.player.x, b.y - this.player.y);
-          if (d < minD) {
-            minD = d;
-            nearest = b;
+          // 1. 神社石板地面纹理
+          if (this.groundPattern) {
+            ctx.fillStyle = this.groundPattern;
+            ctx.fillRect(0, 0, this.map.width, this.map.height);
+          } else {
+            ctx.fillStyle = "#141b2c";
+            ctx.fillRect(0, 0, this.map.width, this.map.height);
           }
+
+          // 2. 绘制电池道具
+          this._drawBatteries(ctx);
+
+          // 3. 绘制假狐火
+          this._drawDecoyFires(ctx);
+
+          // 4. 绘制男主角「三谷 熊太」
+          this._drawPlayer(ctx);
+
+          // 5. 绘制女主角「稻荷姬 雫音」
+          this.shizune.draw(ctx, this.totalTimeSec);
+
+          // 6. 绘制神社障碍掩体（带视口剔除，提升帧率）
+          const hidingId = this.shizune.state === "hiding" && this.shizune.hidingObstacle ? this.shizune.hidingObstacle.id : null;
+          this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, this.viewW, this.viewH);
+
+          // 7. 绘制粒子特效
+          for (const p of this.particles) {
+            ctx.save();
+            ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        } finally {
+          ctx.restore();
         }
-        const a = Math.atan2(nearest.y - this.player.y, nearest.x - this.player.x);
-        const arrowDist = 56;
-        const ax = this.player.x + Math.cos(a) * arrowDist;
-        const ay = this.player.y + Math.sin(a) * arrowDist;
+
+        // 8. 实时手电筒动态光影、范围迷雾与黑暗遮罩层
+        const dawnProgress = Math.min(1, this.elapsedSec / this.cfg.durationSec);
+        let flickerFactor = 1.0;
+        if (this.player.battery <= 20 && this.player.battery > 0) {
+          flickerFactor = Math.sin(this.totalTimeSec * 28) > -0.35 ? 0.92 : 0.32;
+        }
+
+        this.lighting.render(ctx, this.viewW, this.viewH, renderCamX, renderCamY, {
+          player: this.player,
+          map: this.map,
+          batteries: this.batteries,
+          shizune: this.shizune,
+          decoyFires: this.decoyFires,
+          fogZones: this.fogZones,
+          flashBurstTimer: this.flashBurstTimer,
+          burstSnapshot: this.burstSnapshot,
+          dawnProgress,
+          flickerFactor,
+          timeSec: this.totalTimeSec,
+          inFogFactor: this.inFogFactor
+        });
+
+        // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、假狐火微光、低电电池指引）
         ctx.save();
-        ctx.translate(ax, ay);
-        ctx.rotate(a);
-        ctx.fillStyle = `rgba(82, 232, 255, ${0.55 + Math.sin(this.totalTimeSec * 8) * 0.35})`;
-        ctx.beginPath();
-        ctx.moveTo(10, 0);
-        ctx.lineTo(-6, -6);
-        ctx.lineTo(-3, 0);
-        ctx.lineTo(-6, 6);
-        ctx.closePath();
-        ctx.fill();
+        try {
+          ctx.translate(-renderCamX, -renderCamY);
+
+          const distToShizune = Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y);
+          this.shizune.drawDarknessEyes(ctx, this.totalTimeSec, distToShizune, this.player);
+
+          for (const df of this.decoyFires) {
+            const g = ctx.createRadialGradient(df.x, df.y, 2, df.x, df.y, 26);
+            g.addColorStop(0, "rgba(255, 224, 150, 0.9)");
+            g.addColorStop(0.5, "rgba(235, 68, 98, 0.55)");
+            g.addColorStop(1, "rgba(235, 68, 98, 0)");
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(df.x, df.y + Math.sin(df.phase) * 5, 26, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          if (this.player.battery <= 25 && this.batteries.length > 0 && this.mode === "playing") {
+            let nearest = this.batteries[0];
+            let minD = Infinity;
+            for (const b of this.batteries) {
+              const d = Math.hypot(b.x - this.player.x, b.y - this.player.y);
+              if (d < minD) {
+                minD = d;
+                nearest = b;
+              }
+            }
+            const a = Math.atan2(nearest.y - this.player.y, nearest.x - this.player.x);
+            const arrowDist = 56;
+            const ax = this.player.x + Math.cos(a) * arrowDist;
+            const ay = this.player.y + Math.sin(a) * arrowDist;
+            ctx.save();
+            ctx.translate(ax, ay);
+            ctx.rotate(a);
+            ctx.fillStyle = `rgba(82, 232, 255, ${0.55 + Math.sin(this.totalTimeSec * 8) * 0.35})`;
+            ctx.beginPath();
+            ctx.moveTo(10, 0);
+            ctx.lineTo(-6, -6);
+            ctx.lineTo(-3, 0);
+            ctx.lineTo(-6, 6);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+        } finally {
+          ctx.restore();
+        }
+      } finally {
         ctx.restore();
       }
-
-      ctx.restore();
-      ctx.restore();
     }
 
     _drawBatteries(ctx) {

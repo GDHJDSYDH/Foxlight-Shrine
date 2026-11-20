@@ -916,6 +916,8 @@ html, body {
   position: relative;
   z-index: 2;
   width: min(560px, 94vw);
+  max-height: 88dvh;
+  overflow-y: auto;
   margin-top: auto;
   margin-bottom: clamp(14px, 5vh, 48px);
   padding: 24px 28px;

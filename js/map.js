@@ -213,8 +213,12 @@ class ShrineMap {
 
     const start = this._nearestWalkableCell(sx, sy);
     const goal = this._nearestWalkableCell(tx, ty);
+    // 同格时仅在直线无障碍阻挡时使用精确终点，否则停在可通行格中心（避免把目标点设在祭坛/障碍内部！）
     if (start.c === goal.c && start.r === goal.r) {
-      return [{ x: tx, y: ty }];
+      if (this.isSegmentWalkable(sx, sy, tx, ty, 20)) {
+        return [{ x: tx, y: ty }];
+      }
+      return [{ x: (goal.c + 0.5) * this.cellSize, y: (goal.r + 0.5) * this.cellSize }];
     }
 
     const cols = this.gridCols;
@@ -378,18 +382,21 @@ class ShrineMap {
       trace = cameFrom[trace];
     }
     if (trace !== startIdx) {
-      // 若出现环路或越界异常，丢弃残缺路径直接返回终点
-      return [{ x: tx, y: ty }];
+      // 若出现环路或越界异常，安全回退到目标最近的可通行网格中心
+      return [{ x: (goal.c + 0.5) * this.cellSize, y: (goal.r + 0.5) * this.cellSize }];
     }
     rawPts.reverse();
 
     if (rawPts.length === 0) {
-      return [{ x: tx, y: ty }];
+      return [{ x: (goal.c + 0.5) * this.cellSize, y: (goal.r + 0.5) * this.cellSize }];
     }
 
-    // 用精确终点替代最后一点（如果可达）
+    // 仅当最后一段通过角色碰撞半径校验时才替换为精确终点，绝不让末段穿入祭坛或墙内
     if (found && this.isWalkableCell(goal.c, goal.r)) {
-      rawPts[rawPts.length - 1] = { x: tx, y: ty };
+      const prevPt = rawPts.length >= 2 ? rawPts[rawPts.length - 2] : { x: sx, y: sy };
+      if (this.isSegmentWalkable(prevPt.x, prevPt.y, tx, ty, 20)) {
+        rawPts[rawPts.length - 1] = { x: tx, y: ty };
+      }
     }
 
     // 路径视线拉直（String-Pulling），让 AI 走自然顺滑的斜线而非锯齿折线
@@ -417,6 +424,23 @@ class ShrineMap {
 
   getHideableObstacles() {
     return this.obstacles.filter((o) => o.hideable);
+  }
+
+  // 沿指定方向安全步进（分段扫掠防穿墙，专门用于爆闪击退，彻底杜绝把雫音击飞到屏风/墙体另一侧）
+  moveEntitySwept(entity, dx, dy, steps = 6) {
+    const sx = dx / steps;
+    const sy = dy / steps;
+    for (let i = 0; i < steps; i++) {
+      const prevX = entity.x;
+      const prevY = entity.y;
+      entity.x += sx;
+      entity.y += sy;
+      this.resolveCircleCollisions(entity);
+      // 若遇到墙面几乎推不动则提前停止
+      if (Math.hypot(entity.x - prevX, entity.y - prevY) < Math.hypot(sx, sy) * 0.2) {
+        break;
+      }
+    }
   }
 
   // 圆与矩形碰撞解决，确保实体平滑沿墙滑动

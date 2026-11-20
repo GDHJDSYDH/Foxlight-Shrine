@@ -28,13 +28,14 @@ class InputController {
   _bindKeyboard() {
     window.addEventListener("keydown", (e) => {
       const code = e.code;
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(code)) {
+      const inGameplay = this.callbacks.isPlaying ? this.callbacks.isPlaying() : true;
+      if (inGameplay && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(code)) {
         e.preventDefault();
       }
       if (!this.keys.has(code)) {
-        if (code === "Space" && this.callbacks.onFlash) {
+        if (code === "Space" && inGameplay && this.callbacks.onFlash) {
           this.callbacks.onFlash();
-        } else if (code === "KeyF" && this.callbacks.onToggleLight) {
+        } else if (code === "KeyF" && inGameplay && this.callbacks.onToggleLight) {
           this.callbacks.onToggleLight();
         } else if ((code === "Escape" || code === "KeyP") && this.callbacks.onPause) {
           this.callbacks.onPause();
@@ -54,7 +55,8 @@ class InputController {
   }
 
   _bindMouse() {
-    this.canvas.addEventListener("mousemove", (e) => {
+    // 监听整个 window 的 mousemove，避免鼠标移到技能栏/HUD 上方时停止更新手电筒朝向
+    window.addEventListener("mousemove", (e) => {
       const rect = this.canvas.getBoundingClientRect();
       this.mouseScreenX = e.clientX - rect.left;
       this.mouseScreenY = e.clientY - rect.top;
@@ -62,6 +64,11 @@ class InputController {
     });
 
     this.canvas.addEventListener("mousedown", (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      this.mouseScreenX = e.clientX - rect.left;
+      this.mouseScreenY = e.clientY - rect.top;
+      this.usingMouseAim = true;
+
       if (e.button === 0 && this.callbacks.onFlash) {
         this.callbacks.onFlash();
       } else if (e.button === 2 && this.callbacks.onToggleLight) {
@@ -199,11 +206,16 @@ class InputController {
       return this.aimStick.angle;
     }
 
-    // 电脑端鼠标瞄准（按住 Shift 可临时锁定朝移动方向）
+    // 电脑端鼠标瞄准（按住 Shift 可临时锁定朝移动方向；鼠标在主角中心极近范围 < 8px 时保持上一次稳定方向避免抖动）
     if (this.usingMouseAim && !this.keys.has("ShiftLeft") && !this.keys.has("ShiftRight")) {
       const worldMouseX = this.mouseScreenX + camX;
       const worldMouseY = this.mouseScreenY + camY;
-      return Math.atan2(worldMouseY - playerWorldY, worldMouseX - playerWorldX);
+      const dx = worldMouseX - playerWorldX;
+      const dy = worldMouseY - playerWorldY;
+      if (dx * dx + dy * dy > 64) {
+        return Math.atan2(dy, dx);
+      }
+      return currentAngle;
     }
 
     // 若未手动瞄准，则平滑跟随移动方向
