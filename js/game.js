@@ -109,6 +109,8 @@
       this.player = this._createInitialPlayer();
       this.batteries = [];
       this.decoyFires = [];
+      this.fogZones = [];
+      this.inFogFactor = 0;
       this.particles = [];
       this.batteryRespawnTimer = 0;
       this.flashBurstTimer = 0;
@@ -230,6 +232,8 @@
 
       this.batteries = [];
       this.decoyFires = [];
+      this.fogZones = this._createInitialFogZones();
+      this.inFogFactor = 0;
       this.particles = [];
       this._spawnInitialBatteries();
 
@@ -316,9 +320,15 @@
         });
       }
 
-      this.shizune.hitByFlashBurst(this.player, this.sound, (_type, msg) => {
-        this.showToast(msg, false);
-      });
+      const effectiveRange = this.player.lightRange * (1 - this.inFogFactor * 0.34);
+      this.shizune.hitByFlashBurst(
+        this.player,
+        this.sound,
+        (_type, msg) => {
+          this.showToast(msg, false);
+        },
+        effectiveRange
+      );
     }
 
     showToast(text, isDanger = false) {
@@ -326,6 +336,19 @@
       this.ui.toastBanner.classList.toggle("danger", isDanger);
       this.ui.toastBanner.classList.add("show");
       this.toastTimer = 2.8;
+    }
+
+    _createInitialFogZones() {
+      // 在神社庭院生成若干缓慢飘动的范围迷雾带
+      const seeds = [
+        { x: 320, y: 310, radius: 220, vx: 14, vy: 8, alpha: 0.62, phase: 0.4 },
+        { x: 1440, y: 320, radius: 230, vx: -13, vy: 10, alpha: 0.6, phase: 1.7 },
+        { x: 350, y: 980, radius: 225, vx: 12, vy: -9, alpha: 0.62, phase: 2.9 },
+        { x: 1420, y: 990, radius: 235, vx: -15, vy: -8, alpha: 0.64, phase: 4.1 },
+        { x: 900, y: 260, radius: 205, vx: 11, vy: 6, alpha: 0.55, phase: 5.2 },
+        { x: 900, y: 1050, radius: 210, vx: -11, vy: -7, alpha: 0.56, phase: 0.9 }
+      ];
+      return seeds;
     }
 
     _spawnInitialBatteries() {
@@ -376,7 +399,7 @@
         this.ui.endBgArt.style.backgroundImage = "url('assets/gameover_cg.jpg')";
         this.ui.endBadge.textContent = "CAUGHT BY SHIZUNE";
         this.ui.endBadge.classList.remove("victory");
-        this.ui.endTitle.textContent = "被静音捉住了…";
+        this.ui.endTitle.textContent = "被雫音捉住了…";
         this.ui.endQuote.textContent = "「呵呵……终于抓到你了呢，熊太君。手电筒掉在地上咯，天亮前就乖乖留在我身边吧♪」";
       }
 
@@ -421,7 +444,7 @@
           this.showToast("02:00 AM — 狐火迷踪！小心掩体间的假狐火诱饵！", true);
           this.sound.playShrineBell(0.32, 0, 0.94);
         } else if (phaseIdx === 2) {
-          this.showToast("04:00 AM — 破晓将至！静音的执念变得更加强烈！", true);
+          this.showToast("04:00 AM — 浓雾弥漫！雫音的执念变得更加强烈！", true);
           this.sound.playShrineBell(0.36, 0, 0.88);
         }
       }
@@ -522,6 +545,22 @@
         if (df.life <= 0) this.decoyFires.splice(i, 1);
       }
 
+      // 4.5. 范围迷雾缓慢漂移与玩家身处浓雾程度计算
+      let targetFog = 0;
+      for (const f of this.fogZones) {
+        f.x += f.vx * dt;
+        f.y += f.vy * dt;
+        if (f.x < 140 || f.x > this.map.width - 140) f.vx = -f.vx;
+        if (f.y < 140 || f.y > this.map.height - 140) f.vy = -f.vy;
+        const d = Math.hypot(this.player.x - f.x, this.player.y - f.y);
+        if (d < f.radius) {
+          const strength = 1 - d / f.radius;
+          targetFog = Math.max(targetFog, Math.min(1, strength * 1.35));
+        }
+      }
+      this.inFogFactor += (targetFog - this.inFogFactor) * Math.min(1, dt * 3.5);
+      const effectiveLightRange = this.player.lightRange * (1 - this.inFogFactor * 0.34);
+
       // 5. 粒子更新
       for (let i = this.particles.length - 1; i >= 0; i--) {
         const p = this.particles[i];
@@ -531,9 +570,10 @@
         if (p.life <= 0) this.particles.splice(i, 1);
       }
 
-      // 6. 女主角静音 AI 更新
+      // 6. 女主角雫音 AI 更新
       const aiRes = this.shizune.update(dt, this.player, this.lighting, this.sound, {
         dawnProgress,
+        effectiveLightRange,
         onToast: (msg, danger) => this.showToast(msg, danger),
         addDecoyFire: (x, y) => {
           this.decoyFires.push({ x, y, life: 4.5, phase: 0 });
@@ -584,8 +624,14 @@
       this.ui.hudBatteryFill.classList.toggle("warn", pct <= 40 && pct > 20);
       this.ui.hudBatteryFill.classList.toggle("danger", pct <= 20);
 
-      this.ui.hudLightStatus.textContent = this.player.lightOn ? "手电: 开启" : "手电: 关闭";
-      this.ui.hudLightStatus.classList.toggle("off", !this.player.lightOn);
+      // 走入妖雾区域时在状态栏提示
+      if (this.inFogFactor > 0.35) {
+        this.ui.hudLightStatus.textContent = this.player.lightOn ? "手电: 浓雾受阻" : "手电: 关闭(浓雾)";
+        this.ui.hudLightStatus.classList.add("off");
+      } else {
+        this.ui.hudLightStatus.textContent = this.player.lightOn ? "手电: 开启" : "手电: 关闭";
+        this.ui.hudLightStatus.classList.toggle("off", !this.player.lightOn);
+      }
       this.ui.mobToggleLabel.textContent = this.player.lightOn ? "关灯" : "开灯";
       this.ui.hudBatteryCount.textContent = `${this.batteriesCollected} 颗`;
 
@@ -597,7 +643,7 @@
       this.ui.mobFlashCd.textContent = cdLabel;
       this.ui.mobFlashCd.classList.toggle("active", cdActive);
 
-      // 根据静音距离计算熊太心率 BPM & 危险暗角
+      // 根据雫音距离计算熊太心率 BPM & 危险暗角
       const danger = Math.max(0, Math.min(1, 1 - (distToShizune - 90) / 420));
       const ambushBoost = this.shizune.state === "ambush" ? 0.35 : 0;
       const totalDanger = Math.min(1, danger + ambushBoost);
@@ -611,7 +657,7 @@
       this.ui.dangerVignette.style.opacity = totalDanger > 0.25 ? ((totalDanger - 0.22) * pulse * 0.92).toFixed(3) : "0";
       this.sound.updateHeartbeat(nowMs, bpm, totalDanger);
 
-      // 右上角静音预警条
+      // 右上角雫音预警条
       if (this.shizune.state === "ambush") {
         this.ui.shizuneAlert.classList.add("active");
         this.ui.shizuneAlertText.textContent = "突袭扑来！快用强光！";
@@ -662,7 +708,7 @@
       // 4. 绘制男主角「三谷 熊太」
       this._drawPlayer(ctx);
 
-      // 5. 绘制女主角「稻荷姬 静音」
+      // 5. 绘制女主角「稻荷姬 雫音」
       this.shizune.draw(ctx, this.totalTimeSec);
 
       // 6. 绘制神社障碍掩体（在角色之上或同层，带晃动与隐藏狐尾线索）
@@ -682,7 +728,7 @@
 
       ctx.restore();
 
-      // 8. 实时手电筒动态光影与黑暗遮罩层
+      // 8. 实时手电筒动态光影、范围迷雾与黑暗遮罩层
       const dawnProgress = Math.min(1, this.elapsedSec / this.cfg.durationSec);
       let flickerFactor = 1.0;
       if (this.player.battery <= 20 && this.player.battery > 0) {
@@ -696,17 +742,20 @@
         batteries: this.batteries,
         shizune: this.shizune,
         decoyFires: this.decoyFires,
+        fogZones: this.fogZones,
         flashBurstTimer: this.flashBurstTimer,
         dawnProgress,
-        flickerFactor
+        flickerFactor,
+        timeSec: this.totalTimeSec,
+        inFogFactor: this.inFogFactor
       });
 
-      // 9. 在黑暗遮罩之上的微弱氛围提示层（静音暗处金瞳、假狐火微光、低电电池指引）
+      // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、假狐火微光、低电电池指引）
       ctx.save();
       ctx.translate(-renderCamX, -renderCamY);
 
       const distToShizune = Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y);
-      this.shizune.drawDarknessEyes(ctx, this.totalTimeSec, distToShizune);
+      this.shizune.drawDarknessEyes(ctx, this.totalTimeSec, distToShizune, this.player);
 
       // 假狐火穿透黑夜的幽红微芒
       for (const df of this.decoyFires) {

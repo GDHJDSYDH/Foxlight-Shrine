@@ -329,7 +329,7 @@ html, body {
   color: #ffb3c0;
 }
 
-/* 右上角：静音预警框 + 工具按钮 */
+/* 右上角：雫音预警框 + 工具按钮 */
 .top-right-hud {
   position: absolute;
   top: max(12px, env(safe-area-inset-top));

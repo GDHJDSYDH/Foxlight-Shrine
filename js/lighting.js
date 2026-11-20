@@ -1,37 +1,60 @@
 /**
- * 动态 2D 射线追踪手电筒视野阴影与黑暗遮罩渲染引擎
+ * 动态 2D 精确射线追踪视野阴影 + 范围迷雾 + 黑暗遮罩渲染引擎
+ * 特点：
+ * 1. 结合障碍物顶点角射线 + 均匀采样射线，确保手电光束在任意障碍物边角都锐利截断、绝不穿墙漏光。
+ * 2. 熊太周身近距离微弱夜视同样受障碍物遮挡，不会透墙照亮墙后。
+ * 3. 加入飘动的“范围迷雾”系统：随时间推移与雫音靠近，外围与浓雾带逐渐弥漫并压缩视野边界。
  */
 class LightingSystem {
   constructor() {
     this.maskCanvas = document.createElement("canvas");
     this.maskCtx = this.maskCanvas.getContext("2d");
-    this.rayCount = 72;
+    this.rayCount = 84;
+    this.selfRayCount = 56;
   }
 
   resize(width, height) {
-    // 使用半分辨率或原生分辨率，保证移动端 60fps 流畅
-    const scale = width > 1000 ? 0.8 : 0.75;
+    const scale = width > 1000 ? 0.85 : 0.75;
     this.scale = scale;
     this.maskCanvas.width = Math.max(1, Math.floor(width * scale));
     this.maskCanvas.height = Math.max(1, Math.floor(height * scale));
   }
 
-  // 计算从 (ox, oy) 沿 angle 角度发射的光线，在 maxDist 内碰到的最近障碍物交点
-  castRay(ox, oy, angle, maxDist, obstacles) {
+  // 计算从 (ox, oy) 沿 angle 角度发射的光线，在 maxDist 内碰到的最近障碍物或边界墙交点
+  castRay(ox, oy, angle, maxDist, obstacles, map) {
     const dx = Math.cos(angle);
     const dy = Math.sin(angle);
     let minT = maxDist;
 
+    // 1. 检测外围神社石墙，保证光束不穿透外墙
+    if (map) {
+      if (dx < -1e-7) {
+        const t = (map.minX - ox) / dx;
+        if (t > 0 && t < minT) minT = t;
+      } else if (dx > 1e-7) {
+        const t = (map.maxX - ox) / dx;
+        if (t > 0 && t < minT) minT = t;
+      }
+      if (dy < -1e-7) {
+        const t = (map.minY - oy) / dy;
+        if (t > 0 && t < minT) minT = t;
+      } else if (dy > 1e-7) {
+        const t = (map.maxY - oy) / dy;
+        if (t > 0 && t < minT) minT = t;
+      }
+    }
+
+    // 2. 检测所有阻光障碍物矩形
     for (let i = 0; i < obstacles.length; i++) {
       const o = obstacles[i];
       if (!o.blocksLight) continue;
 
-      // 快速 AABB 距离剔除
+      // 快速圆距剔除
       const cx = o.cx - ox;
       const cy = o.cy - oy;
-      if (cx * cx + cy * cy > (maxDist + o.w + o.h) * (maxDist + o.w + o.h)) continue;
+      const bound = minT + o.w + o.h;
+      if (cx * cx + cy * cy > bound * bound) continue;
 
-      // Slab method 射线与矩形求交
       let tmin = 0;
       let tmax = minT;
 
@@ -67,7 +90,7 @@ class LightingSystem {
         if (tmin > tmax) continue;
       }
 
-      if (tmin > 0 && tmin < minT) {
+      if (tmin >= 0 && tmin < minT) {
         minT = tmin;
       }
     }
@@ -79,17 +102,63 @@ class LightingSystem {
     };
   }
 
-  // 构建手电筒扇形光束多边形（世界坐标）
-  computeFlashlightPolygon(ox, oy, dirAngle, halfFov, range, obstacles) {
-    const pts = [{ x: ox, y: oy }];
+  // 构建精确贴合障碍物拐角的手电筒扇形光束多边形（杜绝拐角漏光或穿墙）
+  computeFlashlightPolygon(ox, oy, dirAngle, halfFov, range, obstacles, map) {
+    // 收集相对角度（[-halfFov, +halfFov]）
+    const relAngles = [];
     const steps = this.rayCount;
-    const startAngle = dirAngle - halfFov;
-    const stepAngle = (halfFov * 2) / steps;
-
     for (let i = 0; i <= steps; i++) {
-      const a = startAngle + i * stepAngle;
-      const hit = this.castRay(ox, oy, a, range, obstacles);
-      pts.push(hit);
+      relAngles.push(-halfFov + (halfFov * 2 * i) / steps);
+    }
+
+    // 对射程内的每个阻光障碍物四个顶点发射 ±0.0008 rad 贴边射线，精准卡死阴影边沿
+    const eps = 0.0008;
+    const rangeSq = (range + 220) * (range + 220);
+    for (let i = 0; i < obstacles.length; i++) {
+      const o = obstacles[i];
+      if (!o.blocksLight) continue;
+      const cdx = o.cx - ox;
+      const cdy = o.cy - oy;
+      if (cdx * cdx + cdy * cdy > rangeSq) continue;
+
+      const corners = [
+        [o.x, o.y],
+        [o.x + o.w, o.y],
+        [o.x + o.w, o.y + o.h],
+        [o.x, o.y + o.h]
+      ];
+      for (let k = 0; k < 4; k++) {
+        let rel = Math.atan2(corners[k][1] - oy, corners[k][0] - ox) - dirAngle;
+        while (rel > Math.PI) rel -= Math.PI * 2;
+        while (rel < -Math.PI) rel += Math.PI * 2;
+        if (rel >= -halfFov && rel <= halfFov) {
+          relAngles.push(rel);
+          if (rel - eps >= -halfFov) relAngles.push(rel - eps);
+          if (rel + eps <= halfFov) relAngles.push(rel + eps);
+        }
+      }
+    }
+
+    relAngles.sort((a, b) => a - b);
+
+    const pts = [{ x: ox, y: oy }];
+    let lastRel = -999;
+    for (let i = 0; i < relAngles.length; i++) {
+      const rel = relAngles[i];
+      if (rel - lastRel < 0.00025) continue;
+      lastRel = rel;
+      pts.push(this.castRay(ox, oy, dirAngle + rel, range, obstacles, map));
+    }
+    return pts;
+  }
+
+  // 构建受障碍物遮挡的 360° 近身微弱夜视多边形（防止周身视野穿墙透视）
+  computeRadialVisibilityPolygon(ox, oy, radius, obstacles, map) {
+    const pts = [];
+    const n = this.selfRayCount;
+    for (let i = 0; i < n; i++) {
+      const a = (Math.PI * 2 * i) / n;
+      pts.push(this.castRay(ox, oy, a, radius, obstacles, map));
     }
     return pts;
   }
@@ -114,7 +183,7 @@ class LightingSystem {
     return { lit: los, dist, angleDiff: Math.abs(diff) };
   }
 
-  // 渲染黑暗遮罩层与手电筒体积光
+  // 渲染黑暗遮罩层、手电筒体积光与范围迷雾
   render(mainCtx, viewW, viewH, camX, camY, state) {
     const {
       player,
@@ -122,9 +191,12 @@ class LightingSystem {
       batteries,
       shizune,
       decoyFires,
+      fogZones,
       flashBurstTimer,
       dawnProgress,
-      flickerFactor
+      flickerFactor,
+      timeSec,
+      inFogFactor
     } = state;
 
     const mctx = this.maskCtx;
@@ -132,13 +204,25 @@ class LightingSystem {
     const mw = this.maskCanvas.width;
     const mh = this.maskCanvas.height;
 
+    // 计算手电筒物理发出点（稍微在手电筒前端，若贴墙则退回人物中心避免穿入障碍物内部）
+    let originX = player.x + Math.cos(player.aimAngle) * 10;
+    let originY = player.y + Math.sin(player.aimAngle) * 10;
+    if (!map.hasLineOfSight(player.x, player.y, originX, originY, null)) {
+      originX = player.x;
+      originY = player.y;
+    }
+
+    // 范围迷雾视野压缩：走入妖雾团或接近后半夜时，视野外圈被迷雾收束
+    const fogRangeMult = 1 - (inFogFactor || 0) * 0.34;
+    const effectiveBaseRange = player.lightRange * fogRangeMult;
+
     mctx.save();
     mctx.setTransform(1, 0, 0, 1, 0, 0);
     mctx.clearRect(0, 0, mw, mh);
 
     // 随破晓临近（5:00 -> 6:00），环境夜色逐渐过渡为微蓝黎明微光
     const dawnEase = Math.max(0, (dawnProgress - 0.78) / 0.22);
-    const darknessAlpha = 0.94 - dawnEase * 0.26;
+    const darknessAlpha = Math.min(0.96, 0.94 - dawnEase * 0.26 + (inFogFactor || 0) * 0.04);
     mctx.fillStyle = `rgba(4, 7, 16, ${darknessAlpha.toFixed(3)})`;
     mctx.fillRect(0, 0, mw, mh);
 
@@ -147,40 +231,41 @@ class LightingSystem {
     mctx.scale(s, s);
     mctx.translate(-camX, -camY);
 
-    // 1. 熊太周身微弱夜视圈（关灯时仍能勉强看清脚下）
-    const selfRadius = player.lightOn ? 118 : 76;
-    const selfGrad = mctx.createRadialGradient(
-      player.x,
-      player.y,
-      14,
-      player.x,
-      player.y,
-      selfRadius
-    );
+    // 1. 熊太周身微弱夜视圈（同样受障碍物阻挡，绝不穿墙）
+    const selfRadius = (player.lightOn ? 102 : 70) * (1 - (inFogFactor || 0) * 0.22);
+    const selfPoly = this.computeRadialVisibilityPolygon(player.x, player.y, selfRadius, map.obstacles, map);
+    mctx.save();
+    mctx.beginPath();
+    mctx.moveTo(selfPoly[0].x, selfPoly[0].y);
+    for (let i = 1; i < selfPoly.length; i++) {
+      mctx.lineTo(selfPoly[i].x, selfPoly[i].y);
+    }
+    mctx.closePath();
+    const selfGrad = mctx.createRadialGradient(player.x, player.y, 12, player.x, player.y, selfRadius);
     selfGrad.addColorStop(0, "rgba(0, 0, 0, 0.92)");
-    selfGrad.addColorStop(0.55, "rgba(0, 0, 0, 0.45)");
+    selfGrad.addColorStop(0.55, "rgba(0, 0, 0, 0.42)");
     selfGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
     mctx.fillStyle = selfGrad;
-    mctx.beginPath();
-    mctx.arc(player.x, player.y, selfRadius, 0, Math.PI * 2);
     mctx.fill();
+    mctx.restore();
 
-    // 2. 手电筒光束挖空（带射线遮挡阴影）
+    // 2. 手电筒光束挖空（严格受障碍物顶点射线遮挡）
     let beamPoly = null;
     const effectiveOn = player.lightOn && player.battery > 0.1;
     if (effectiveOn || flashBurstTimer > 0) {
       const isBurst = flashBurstTimer > 0;
-      const range = isBurst ? player.lightRange * 1.42 : player.lightRange;
+      const range = isBurst ? effectiveBaseRange * 1.42 : effectiveBaseRange;
       const halfFov = isBurst ? player.lightHalfFov * 1.45 : player.lightHalfFov;
       const intensity = isBurst ? 1.0 : flickerFactor;
 
       beamPoly = this.computeFlashlightPolygon(
-        player.x,
-        player.y,
+        originX,
+        originY,
         player.aimAngle,
         halfFov,
         range,
-        map.obstacles
+        map.obstacles,
+        map
       );
 
       mctx.save();
@@ -191,78 +276,81 @@ class LightingSystem {
       }
       mctx.closePath();
 
-      const beamGrad = mctx.createRadialGradient(
-        player.x,
-        player.y,
-        10,
-        player.x,
-        player.y,
-        range
-      );
+      const beamGrad = mctx.createRadialGradient(originX, originY, 8, originX, originY, range);
       beamGrad.addColorStop(0, `rgba(0, 0, 0, ${0.98 * intensity})`);
-      beamGrad.addColorStop(0.68, `rgba(0, 0, 0, ${0.88 * intensity})`);
+      beamGrad.addColorStop(0.68, `rgba(0, 0, 0, ${0.86 * intensity})`);
       beamGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
       mctx.fillStyle = beamGrad;
       mctx.fill();
       mctx.restore();
     }
 
-    // 3. 神社石灯笼微弱暖光
+    // 3. 神社石灯笼微弱暖光（仅在玩家范围迷雾可见距离内微弱透出）
+    const fogSightLimit = 560 - (inFogFactor || 0) * 180;
     for (const o of map.obstacles) {
       if (o.type !== "lantern") continue;
-      const lg = mctx.createRadialGradient(o.cx, o.cy, 6, o.cx, o.cy, 92);
-      lg.addColorStop(0, "rgba(0, 0, 0, 0.72)");
-      lg.addColorStop(0.6, "rgba(0, 0, 0, 0.28)");
+      const d = Math.hypot(o.cx - player.x, o.cy - player.y);
+      if (d > fogSightLimit) continue;
+      const fade = Math.max(0, 1 - d / fogSightLimit);
+      const lg = mctx.createRadialGradient(o.cx, o.cy, 6, o.cx, o.cy, 88);
+      lg.addColorStop(0, `rgba(0, 0, 0, ${(0.68 * fade).toFixed(3)})`);
+      lg.addColorStop(0.6, `rgba(0, 0, 0, ${(0.24 * fade).toFixed(3)})`);
       lg.addColorStop(1, "rgba(0, 0, 0, 0)");
       mctx.fillStyle = lg;
       mctx.beginPath();
-      mctx.arc(o.cx, o.cy, 92, 0, Math.PI * 2);
+      mctx.arc(o.cx, o.cy, 88, 0, Math.PI * 2);
       mctx.fill();
     }
 
-    // 4. 电池发光点（穿透夜色以便玩家发现远处的电池）
+    // 4. 电池发光点（穿透夜色以便玩家发现，但受远距浓雾衰减）
     for (const b of batteries) {
-      const bg = mctx.createRadialGradient(b.x, b.y, 4, b.x, b.y, 70);
-      bg.addColorStop(0, "rgba(0, 0, 0, 0.85)");
-      bg.addColorStop(0.55, "rgba(0, 0, 0, 0.32)");
+      const d = Math.hypot(b.x - player.x, b.y - player.y);
+      const fade = Math.max(0.28, 1 - d / 780);
+      const bg = mctx.createRadialGradient(b.x, b.y, 4, b.x, b.y, 66);
+      bg.addColorStop(0, `rgba(0, 0, 0, ${(0.84 * fade).toFixed(3)})`);
+      bg.addColorStop(0.55, `rgba(0, 0, 0, ${(0.3 * fade).toFixed(3)})`);
       bg.addColorStop(1, "rgba(0, 0, 0, 0)");
       mctx.fillStyle = bg;
       mctx.beginPath();
-      mctx.arc(b.x, b.y, 70, 0, Math.PI * 2);
+      mctx.arc(b.x, b.y, 66, 0, Math.PI * 2);
       mctx.fill();
     }
 
-    // 5. 静音狐火/假狐火微弱透光
+    // 5. 假狐火微弱透光
     for (const df of decoyFires) {
-      const fg = mctx.createRadialGradient(df.x, df.y, 3, df.x, df.y, 65);
-      fg.addColorStop(0, "rgba(0, 0, 0, 0.78)");
+      const fg = mctx.createRadialGradient(df.x, df.y, 3, df.x, df.y, 62);
+      fg.addColorStop(0, "rgba(0, 0, 0, 0.76)");
       fg.addColorStop(1, "rgba(0, 0, 0, 0)");
       mctx.fillStyle = fg;
       mctx.beginPath();
-      mctx.arc(df.x, df.y, 65, 0, Math.PI * 2);
+      mctx.arc(df.x, df.y, 62, 0, Math.PI * 2);
       mctx.fill();
     }
 
-    // 静音突袭或被照亮时自身微弱光环
-    if (shizune && (shizune.state === "ambush" || shizune.state === "stunned" || shizune.litExposure > 0.1)) {
-      const sg = mctx.createRadialGradient(shizune.x, shizune.y, 8, shizune.x, shizune.y, 74);
-      sg.addColorStop(0, "rgba(0, 0, 0, 0.75)");
+    // 6. 雫音突袭或被照亮时自身微弱光环（且需与玩家无障碍遮挡，防止穿墙透视雫音！）
+    if (
+      shizune &&
+      (shizune.state === "ambush" || shizune.state === "stunned" || shizune.litExposure > 0.1) &&
+      map.hasLineOfSight(player.x, player.y, shizune.x, shizune.y, null)
+    ) {
+      const sg = mctx.createRadialGradient(shizune.x, shizune.y, 8, shizune.x, shizune.y, 68);
+      sg.addColorStop(0, "rgba(0, 0, 0, 0.74)");
       sg.addColorStop(1, "rgba(0, 0, 0, 0)");
       mctx.fillStyle = sg;
       mctx.beginPath();
-      mctx.arc(shizune.x, shizune.y, 74, 0, Math.PI * 2);
+      mctx.arc(shizune.x, shizune.y, 68, 0, Math.PI * 2);
       mctx.fill();
     }
 
     mctx.restore();
 
-    // 将黑暗遮罩合成到主画布（使用物理像素尺寸配合 setTransform(1,0,0,1,0,0)，彻底修复高 DPI / Windows 125%-150% 缩放下的错位与双重光束）
+    // 将黑暗遮罩合成到主画布（严格使用物理像素尺寸，兼容所有高 DPI 缩放）
     mainCtx.save();
     mainCtx.setTransform(1, 0, 0, 1, 0, 0);
     mainCtx.drawImage(this.maskCanvas, 0, 0, mainCtx.canvas.width, mainCtx.canvas.height);
     mainCtx.restore();
 
-    // 叠加手电筒柔和暖白体积光（增强真实手电筒光束质感）
+    // 叠加手电筒柔和暖白体积光（与精确遮挡多边形完全重合）
     if (beamPoly) {
       mainCtx.save();
       mainCtx.translate(-camX, -camY);
@@ -275,15 +363,8 @@ class LightingSystem {
       mainCtx.closePath();
 
       const isBurst = flashBurstTimer > 0;
-      const range = isBurst ? player.lightRange * 1.42 : player.lightRange;
-      const volGrad = mainCtx.createRadialGradient(
-        player.x,
-        player.y,
-        6,
-        player.x,
-        player.y,
-        range
-      );
+      const range = isBurst ? effectiveBaseRange * 1.42 : effectiveBaseRange;
+      const volGrad = mainCtx.createRadialGradient(originX, originY, 6, originX, originY, range);
       if (isBurst) {
         const a = Math.min(0.65, flashBurstTimer * 1.6);
         volGrad.addColorStop(0, `rgba(255, 250, 224, ${a})`);
@@ -300,7 +381,71 @@ class LightingSystem {
       mainCtx.restore();
     }
 
+    // =========================================================================
+    // 范围迷雾系统渲染：
+    // A. 世界内漂浮的神社幽蓝妖雾团（玩家进入雾团会压缩手电视野）
+    // B. 围绕玩家外围的动态环形范围迷雾（营造沉浸压迫感）
+    // =========================================================================
+    this._renderFogLayer(mainCtx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor || 0);
+
     return beamPoly;
+  }
+
+  _renderFogLayer(ctx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor) {
+    // 1. 世界空间中的局部漂浮浓雾区
+    if (fogZones && fogZones.length > 0) {
+      ctx.save();
+      ctx.translate(-camX, -camY);
+      for (const f of fogZones) {
+        const pulse = 0.85 + Math.sin(timeSec * 1.1 + f.phase) * 0.15;
+        const r = f.radius * pulse;
+        const grad = ctx.createRadialGradient(f.x, f.y, r * 0.12, f.x, f.y, r);
+        const a = f.alpha * (0.85 + dawnProgress * 0.25);
+        grad.addColorStop(0, `rgba(118, 138, 178, ${(a * 0.58).toFixed(3)})`);
+        grad.addColorStop(0.55, `rgba(68, 86, 128, ${(a * 0.34).toFixed(3)})`);
+        grad.addColorStop(1, "rgba(26, 36, 62, 0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 2. 围绕玩家的环形范围迷雾（外围始终笼罩流动的冷灰蓝夜雾，随时间/步入妖雾加深收紧）
+    const px = player.x - camX;
+    const py = player.y - camY;
+    const hour = dawnProgress * 6;
+    const baseClearRadius = Math.max(210, 390 - hour * 18 - inFogFactor * 125);
+    const outerRadius = Math.max(viewW, viewH) * 0.78;
+    const fogOpacity = Math.min(0.86, 0.44 + hour * 0.045 + inFogFactor * 0.28);
+
+    ctx.save();
+    const ringGrad = ctx.createRadialGradient(px, py, baseClearRadius * 0.55, px, py, outerRadius);
+    ringGrad.addColorStop(0, "rgba(18, 26, 46, 0)");
+    ringGrad.addColorStop(0.42, `rgba(22, 32, 56, ${(fogOpacity * 0.36).toFixed(3)})`);
+    ringGrad.addColorStop(0.75, `rgba(14, 21, 38, ${(fogOpacity * 0.78).toFixed(3)})`);
+    ringGrad.addColorStop(1, `rgba(8, 12, 24, ${fogOpacity.toFixed(3)})`);
+    ctx.fillStyle = ringGrad;
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    // 缓缓横飘的半透明薄雾丝缕（增加空间流动感）
+    const drift1 = ((timeSec * 22) % (viewW + 420)) - 210;
+    const drift2 = viewW - (((timeSec * 16 + 260) % (viewW + 420)) - 210);
+    const wispAlpha = (0.08 + inFogFactor * 0.14 + Math.min(0.08, hour * 0.015)).toFixed(3);
+
+    const w1 = ctx.createRadialGradient(drift1, viewH * 0.32, 20, drift1, viewH * 0.32, 260);
+    w1.addColorStop(0, `rgba(165, 190, 232, ${wispAlpha})`);
+    w1.addColorStop(1, "rgba(165, 190, 232, 0)");
+    ctx.fillStyle = w1;
+    ctx.fillRect(0, 0, viewW, viewH);
+
+    const w2 = ctx.createRadialGradient(drift2, viewH * 0.72, 20, drift2, viewH * 0.72, 290);
+    w2.addColorStop(0, `rgba(145, 168, 215, ${wispAlpha})`);
+    w2.addColorStop(1, "rgba(145, 168, 215, 0)");
+    ctx.fillStyle = w2;
+    ctx.fillRect(0, 0, viewW, viewH);
+    ctx.restore();
   }
 }
 

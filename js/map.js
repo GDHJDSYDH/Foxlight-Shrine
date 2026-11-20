@@ -1,5 +1,5 @@
 /**
- * 午夜稻荷神社庭院地图布局、掩体障碍物、电池点位与碰撞求解
+ * 午夜稻荷神社庭院地图布局、掩体障碍物、电池点位、碰撞求解与 A* 网格寻路
  */
 class ShrineMap {
   constructor() {
@@ -8,11 +8,18 @@ class ShrineMap {
     this.wallThickness = 44;
 
     // 障碍物列表（矩形掩体：type = 'torii' | 'lantern' | 'screen' | 'bush' | 'shrine'）
-    // hideable: 静音是否能躲在里面/后面埋伏
+    // hideable: 雫音是否能躲在里面/后面埋伏
     // blocksLight: 是否阻挡手电筒光线产生阴影
     this.obstacles = [];
     this.batterySpawns = [];
     this.buildLayout();
+
+    // 网格寻路参数（40px 栅格，兼顾绕障精度与 60fps 极速性能）
+    this.cellSize = 40;
+    this.gridCols = Math.ceil(this.width / this.cellSize);
+    this.gridRows = Math.ceil(this.height / this.cellSize);
+    this.navGrid = new Uint8Array(this.gridCols * this.gridRows);
+    this._buildNavGrid();
   }
 
   buildLayout() {
@@ -20,7 +27,7 @@ class ShrineMap {
     const H = this.height;
 
     this.obstacles = [
-      // 中央主祭台/绘马亭（略微偏上，周围留开阔走廊避免卡死）
+      // 中央主祭台/绘马亭（周围留开阔走廊避免卡死）
       { id: "center_altar", x: 810, y: 560, w: 180, h: 120, type: "shrine", hideable: true, blocksLight: true, shake: 0 },
 
       // 四方朱红鸟居柱（成对分布，兼具通道视觉与阴影盲区）
@@ -45,7 +52,7 @@ class ShrineMap {
       { id: "screen_mw", x: 580, y: 590, w: 42, h: 140, type: "screen", hideable: true, blocksLight: true, shake: 0 },
       { id: "screen_me", x: 1178, y: 590, w: 42, h: 140, type: "screen", hideable: true, blocksLight: true, shake: 0 },
 
-      // 茂密山茶/椿树灌木丛（静音最爱藏身的掩体，藏身时会晃动并露出狐尾！）
+      // 茂密山茶/椿树灌木丛（雫音最爱藏身的掩体，藏身时会晃动并露出狐尾！）
       { id: "bush_nw1", x: 170, y: 180, w: 112, h: 96, type: "bush", hideable: true, blocksLight: true, shake: 0 },
       { id: "bush_nw2", x: 200, y: 440, w: 96, h: 86, type: "bush", hideable: true, blocksLight: true, shake: 0 },
       { id: "bush_ne1", x: 1518, y: 180, w: 112, h: 96, type: "bush", hideable: true, blocksLight: true, shake: 0 },
@@ -92,17 +99,307 @@ class ShrineMap {
       { x: 1060, y: 855 }
     ];
 
-    // 预计算每个障碍物的中心点
     for (const o of this.obstacles) {
       o.cx = o.x + o.w * 0.5;
       o.cy = o.y + o.h * 0.5;
     }
 
-    // 边界墙安全范围
     this.minX = this.wallThickness;
     this.maxX = W - this.wallThickness;
     this.minY = this.wallThickness;
     this.maxY = H - this.wallThickness;
+  }
+
+  // 构建带角色碰撞半径膨胀的可通行导航网格
+  _buildNavGrid() {
+    const pad = 21; // 比雫音 radius(20) 略大，避免贴墙卡角
+    for (let r = 0; r < this.gridRows; r++) {
+      for (let c = 0; c < this.gridCols; c++) {
+        const wx = (c + 0.5) * this.cellSize;
+        const wy = (r + 0.5) * this.cellSize;
+        let blocked =
+          wx < this.minX + pad ||
+          wx > this.maxX - pad ||
+          wy < this.minY + pad ||
+          wy > this.maxY - pad;
+
+        if (!blocked) {
+          for (const o of this.obstacles) {
+            if (wx >= o.x - pad && wx <= o.x + o.w + pad && wy >= o.y - pad && wy <= o.y + o.h + pad) {
+              blocked = true;
+              break;
+            }
+          }
+        }
+        this.navGrid[r * this.gridCols + c] = blocked ? 1 : 0;
+      }
+    }
+  }
+
+  isWalkableCell(c, r) {
+    if (c < 0 || r < 0 || c >= this.gridCols || r >= this.gridRows) return false;
+    return this.navGrid[r * this.gridCols + c] === 0;
+  }
+
+  // 找到离指定世界坐标最近的可通行网格单元
+  _nearestWalkableCell(wx, wy) {
+    const sc = Math.max(0, Math.min(this.gridCols - 1, Math.floor(wx / this.cellSize)));
+    const sr = Math.max(0, Math.min(this.gridRows - 1, Math.floor(wy / this.cellSize)));
+    if (this.isWalkableCell(sc, sr)) return { c: sc, r: sr };
+
+    for (let rad = 1; rad <= 6; rad++) {
+      let best = null;
+      let bestD = Infinity;
+      for (let dr = -rad; dr <= rad; dr++) {
+        for (let dc = -rad; dc <= rad; dc++) {
+          if (Math.abs(dr) !== rad && Math.abs(dc) !== rad) continue;
+          const nc = sc + dc;
+          const nr = sr + dr;
+          if (!this.isWalkableCell(nc, nr)) continue;
+          const cx = (nc + 0.5) * this.cellSize;
+          const cy = (nr + 0.5) * this.cellSize;
+          const d = (cx - wx) * (cx - wx) + (cy - wy) * (cy - wy);
+          if (d < bestD) {
+            bestD = d;
+            best = { c: nc, r: nr };
+          }
+        }
+      }
+      if (best) return best;
+    }
+    return { c: sc, r: sr };
+  }
+
+  // 检查两点之间是否无障碍物阻挡（含实体半径膨胀，供路径平滑和冲刺检测使用）
+  isSegmentWalkable(x1, y1, x2, y2, radius = 18) {
+    for (const o of this.obstacles) {
+      if (
+        ShrineMap.segmentIntersectsRect(
+          x1,
+          y1,
+          x2,
+          y2,
+          o.x - radius,
+          o.y - radius,
+          o.w + radius * 2,
+          o.h + radius * 2
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 8方向 A* 网格寻路（可选手电筒避光惩罚，让雫音主动绕着光束阴影走！）
+   * @param {number} sx 起点 X
+   * @param {number} sy 起点 Y
+   * @param {number} tx 终点 X
+   * @param {number} ty 终点 Y
+   * @param {object|null} avoidBeam { x, y, angle, halfFov, range } 避光区域
+   * @returns {Array<{x:number, y:number}>} 路径点数组
+   */
+  findPath(sx, sy, tx, ty, avoidBeam = null) {
+    // 若直线完全通畅且不需避光，直接返回终点
+    if (!avoidBeam && this.isSegmentWalkable(sx, sy, tx, ty, 20)) {
+      return [{ x: tx, y: ty }];
+    }
+
+    const start = this._nearestWalkableCell(sx, sy);
+    const goal = this._nearestWalkableCell(tx, ty);
+    if (start.c === goal.c && start.r === goal.r) {
+      return [{ x: tx, y: ty }];
+    }
+
+    const cols = this.gridCols;
+    const total = cols * this.gridRows;
+    const startIdx = start.r * cols + start.c;
+    const goalIdx = goal.r * cols + goal.c;
+
+    const gScore = new Float32Array(total);
+    gScore.fill(1e9);
+    const cameFrom = new Int32Array(total);
+    cameFrom.fill(-1);
+    const closed = new Uint8Array(total);
+
+    // 轻量二叉最小堆，保证 <0.3ms 寻路耗时
+    const heapIdx = [];
+    const heapF = [];
+    const pushHeap = (idx, f) => {
+      let i = heapIdx.length;
+      heapIdx.push(idx);
+      heapF.push(f);
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (heapF[p] <= f) break;
+        heapIdx[i] = heapIdx[p];
+        heapF[i] = heapF[p];
+        i = p;
+      }
+      heapIdx[i] = idx;
+      heapF[i] = f;
+    };
+    const popHeap = () => {
+      const top = heapIdx[0];
+      const lastIdx = heapIdx.pop();
+      const lastF = heapF.pop();
+      const n = heapIdx.length;
+      if (n > 0) {
+        let i = 0;
+        while (true) {
+          let l = (i << 1) + 1;
+          let r = l + 1;
+          let smallest = i;
+          if (l < n && heapF[l] < lastF) smallest = l;
+          if (r < n && heapF[r] < (smallest === i ? lastF : heapF[l])) smallest = r;
+          if (smallest === i) break;
+          heapIdx[i] = heapIdx[smallest];
+          heapF[i] = heapF[smallest];
+          i = smallest;
+        }
+        heapIdx[i] = lastIdx;
+        heapF[i] = lastF;
+      }
+      return top;
+    };
+
+    const hEst = (c, r) => {
+      const dx = Math.abs(c - goal.c);
+      const dy = Math.abs(r - goal.r);
+      return Math.max(dx, dy) + 0.414 * Math.min(dx, dy);
+    };
+
+    gScore[startIdx] = 0;
+    pushHeap(startIdx, hEst(start.c, start.r));
+
+    const dirs = [
+      [1, 0, 1],
+      [-1, 0, 1],
+      [0, 1, 1],
+      [0, -1, 1],
+      [1, 1, 1.414],
+      [-1, 1, 1.414],
+      [1, -1, 1.414],
+      [-1, -1, 1.414]
+    ];
+
+    let found = false;
+    let bestClosestIdx = startIdx;
+    let bestClosestH = hEst(start.c, start.r);
+    let iterations = 0;
+    const maxIter = 750;
+
+    while (heapIdx.length > 0 && iterations < maxIter) {
+      iterations++;
+      const cur = popHeap();
+      if (closed[cur]) continue;
+      closed[cur] = 1;
+
+      if (cur === goalIdx) {
+        found = true;
+        break;
+      }
+
+      const cc = cur % cols;
+      const cr = (cur / cols) | 0;
+      const ch = hEst(cc, cr);
+      if (ch < bestClosestH) {
+        bestClosestH = ch;
+        bestClosestIdx = cur;
+      }
+
+      for (let d = 0; d < 8; d++) {
+        const dc = dirs[d][0];
+        const dr = dirs[d][1];
+        const nc = cc + dc;
+        const nr = cr + dr;
+        if (!this.isWalkableCell(nc, nr)) continue;
+
+        // 禁止斜向穿墙角（防止贴障碍拐角被卡住）
+        if (dc !== 0 && dr !== 0) {
+          if (!this.isWalkableCell(cc + dc, cr) || !this.isWalkableCell(cc, cr + dr)) {
+            continue;
+          }
+        }
+
+        const nIdx = nr * cols + nc;
+        if (closed[nIdx]) continue;
+
+        let stepCost = dirs[d][2];
+
+        // 避光代价：如果某格在男主手电光束扇形范围内且无掩体遮挡，大幅增加代价促使 AI 绕后/走阴影
+        if (avoidBeam) {
+          const wx = (nc + 0.5) * this.cellSize;
+          const wy = (nr + 0.5) * this.cellSize;
+          const bdx = wx - avoidBeam.x;
+          const bdy = wy - avoidBeam.y;
+          const bDistSq = bdx * bdx + bdy * bdy;
+          const rangePad = avoidBeam.range + 45;
+          if (bDistSq < rangePad * rangePad) {
+            const ang = Math.atan2(bdy, bdx);
+            let diff = ang - avoidBeam.angle;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            if (Math.abs(diff) < avoidBeam.halfFov + 0.24) {
+              stepCost += 5.5;
+            }
+          }
+        }
+
+        const tentativeG = gScore[cur] + stepCost;
+        if (tentativeG < gScore[nIdx]) {
+          cameFrom[nIdx] = cur;
+          gScore[nIdx] = tentativeG;
+          pushHeap(nIdx, tentativeG + hEst(nc, nr));
+        }
+      }
+    }
+
+    const endIdx = found ? goalIdx : bestClosestIdx;
+    const rawPts = [];
+    let trace = endIdx;
+    while (trace !== -1 && trace !== startIdx) {
+      const tc = trace % cols;
+      const tr = (trace / cols) | 0;
+      rawPts.push({
+        x: (tc + 0.5) * this.cellSize,
+        y: (tr + 0.5) * this.cellSize
+      });
+      trace = cameFrom[trace];
+    }
+    rawPts.reverse();
+
+    if (rawPts.length === 0) {
+      return [{ x: tx, y: ty }];
+    }
+
+    // 用精确终点替代最后一点（如果可达）
+    if (found && this.isWalkableCell(goal.c, goal.r)) {
+      rawPts[rawPts.length - 1] = { x: tx, y: ty };
+    }
+
+    // 路径视线拉直（String-Pulling），让 AI 走自然顺滑的斜线而非锯齿折线
+    if (!avoidBeam && rawPts.length > 2) {
+      const smoothed = [];
+      let anchor = { x: sx, y: sy };
+      let i = 0;
+      while (i < rawPts.length) {
+        let furthest = i;
+        for (let j = rawPts.length - 1; j > i; j--) {
+          if (this.isSegmentWalkable(anchor.x, anchor.y, rawPts[j].x, rawPts[j].y, 20)) {
+            furthest = j;
+            break;
+          }
+        }
+        smoothed.push(rawPts[furthest]);
+        anchor = rawPts[furthest];
+        i = furthest + 1;
+      }
+      return smoothed;
+    }
+
+    return rawPts;
   }
 
   getHideableObstacles() {
@@ -113,14 +410,12 @@ class ShrineMap {
   resolveCircleCollisions(entity) {
     const r = entity.radius;
 
-    // 边界限制
     if (entity.x < this.minX + r) entity.x = this.minX + r;
     if (entity.x > this.maxX - r) entity.x = this.maxX - r;
     if (entity.y < this.minY + r) entity.y = this.minY + r;
     if (entity.y > this.maxY - r) entity.y = this.maxY - r;
 
-    // 迭代两次避免角落抖动
-    for (let pass = 0; pass < 2; pass++) {
+    for (let pass = 0; pass < 3; pass++) {
       for (const o of this.obstacles) {
         const closestX = Math.max(o.x, Math.min(entity.x, o.x + o.w));
         const closestY = Math.max(o.y, Math.min(entity.y, o.y + o.h));
@@ -135,7 +430,6 @@ class ShrineMap {
             entity.x += (dx / dist) * overlap;
             entity.y += (dy / dist) * overlap;
           } else {
-            // 中心已在矩形内，推向最近边缘
             const leftPen = Math.abs(entity.x - o.x);
             const rightPen = Math.abs(o.x + o.w - entity.x);
             const topPen = Math.abs(entity.y - o.y);
@@ -162,7 +456,7 @@ class ShrineMap {
     return true;
   }
 
-  // 计算从某个障碍物远离目标点的隐藏站位（掩体背面）
+  // 计算从某个障碍物远离目标点的安全隐藏站位（掩体背面且保证不嵌进其它障碍）
   getHidingSpotBehind(obstacle, playerX, playerY, offset = 34) {
     const dx = obstacle.cx - playerX;
     const dy = obstacle.cy - playerY;
@@ -170,20 +464,22 @@ class ShrineMap {
     const nx = dx / len;
     const ny = dy / len;
 
-    // 计算沿 (nx, ny) 离开矩形的边缘位置
     const halfW = obstacle.w * 0.5 + offset;
     const halfH = obstacle.h * 0.5 + offset;
     const tx = Math.abs(nx) > 0.001 ? halfW / Math.abs(nx) : 9999;
     const ty = Math.abs(ny) > 0.001 ? halfH / Math.abs(ny) : 9999;
     const t = Math.min(tx, ty);
 
-    const hx = Math.max(this.minX + 36, Math.min(this.maxX - 36, obstacle.cx + nx * t));
-    const hy = Math.max(this.minY + 36, Math.min(this.maxY - 36, obstacle.cy + ny * t));
-    return { x: hx, y: hy };
+    const probe = {
+      x: Math.max(this.minX + 36, Math.min(this.maxX - 36, obstacle.cx + nx * t)),
+      y: Math.max(this.minY + 36, Math.min(this.maxY - 36, obstacle.cy + ny * t)),
+      radius: 22
+    };
+    this.resolveCircleCollisions(probe);
+    return { x: probe.x, y: probe.y };
   }
 
   static segmentIntersectsRect(x1, y1, x2, y2, rx, ry, rw, rh) {
-    // Liang-Barsky 线段与轴对齐矩形相交检测
     const dx = x2 - x1;
     const dy = y2 - y1;
     let t0 = 0;
@@ -210,7 +506,6 @@ class ShrineMap {
 
   // 绘制神社庭院掩体与场景装饰
   drawObstacles(ctx, timeSec, hidingObstacleId, shizuneAlertGlow) {
-    // 绘制庭院外围朱红石墙围栏
     ctx.save();
     ctx.fillStyle = "#161926";
     ctx.fillRect(0, 0, this.width, this.wallThickness);
@@ -218,7 +513,6 @@ class ShrineMap {
     ctx.fillRect(0, 0, this.wallThickness, this.height);
     ctx.fillRect(this.width - this.wallThickness, 0, this.wallThickness, this.height);
 
-    // 围墙内缘朱红木栏边线
     ctx.strokeStyle = "#7a2430";
     ctx.lineWidth = 4;
     ctx.strokeRect(
@@ -228,7 +522,6 @@ class ShrineMap {
       this.height - this.wallThickness * 2
     );
 
-    // 参道中央微弱石板导引线
     ctx.strokeStyle = "rgba(180, 195, 230, 0.08)";
     ctx.lineWidth = 2;
     ctx.strokeRect(this.width * 0.5 - 70, this.wallThickness, 140, this.height - this.wallThickness * 2);
@@ -238,7 +531,6 @@ class ShrineMap {
     for (const o of this.obstacles) {
       ctx.save();
 
-      // 掩体晃动效果（静音藏身或受惊时）
       let ox = o.x;
       let oy = o.y;
       if (o.shake > 0) {
@@ -246,7 +538,6 @@ class ShrineMap {
         oy += Math.cos(timeSec * 29) * o.shake * 2.2;
       }
 
-      // 地面柔和投影
       ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
       ctx.beginPath();
       ctx.roundRect(ox + 6, oy + 8, o.w, o.h, 8);
@@ -272,13 +563,11 @@ class ShrineMap {
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
 
-    // 底层深墨绿灌木
     ctx.fillStyle = "#162d26";
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 24);
     ctx.fill();
 
-    // 多重圆形树冠簇
     const puffs = [
       { dx: -0.26, dy: -0.18, r: 0.34, c: "#1d3d32" },
       { dx: 0.24, dy: -0.16, r: 0.32, c: "#1f4236" },
@@ -293,7 +582,6 @@ class ShrineMap {
       ctx.fill();
     }
 
-    // 点缀几朵暗红山茶花瓣
     ctx.fillStyle = "#a32e43";
     ctx.beginPath();
     ctx.arc(x + w * 0.28, y + h * 0.32, 4.5, 0, Math.PI * 2);
@@ -301,7 +589,7 @@ class ShrineMap {
     ctx.arc(x + w * 0.55, y + h * 0.28, 3.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 若静音正躲在这丛灌木里，微微露出晃动的红白狐尾尖端！
+    // 若雫音正躲在这丛灌木里，微微露出晃动的红白狐尾尖端！
     if (hideGlow > 0.05) {
       const sway = Math.sin(timeSec * 5.2) * 8;
       ctx.save();
@@ -323,13 +611,11 @@ class ShrineMap {
   }
 
   _drawToriiPillar(ctx, x, y, w, h) {
-    // 石底座
     ctx.fillStyle = "#343b4c";
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 8);
     ctx.fill();
 
-    // 朱红漆柱体
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
     const grad = ctx.createRadialGradient(cx - 5, cy - 5, 4, cx, cy, w * 0.45);
@@ -341,7 +627,6 @@ class ShrineMap {
     ctx.arc(cx, cy, w * 0.42, 0, Math.PI * 2);
     ctx.fill();
 
-    // 顶饰金箍
     ctx.strokeStyle = "#d9a441";
     ctx.lineWidth = 2.5;
     ctx.beginPath();
@@ -350,18 +635,15 @@ class ShrineMap {
   }
 
   _drawShrineScreen(ctx, x, y, w, h) {
-    // 深色木框架
     ctx.fillStyle = "#4d2724";
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 6);
     ctx.fill();
 
-    // 朱红漆饰边框
     ctx.strokeStyle = "#b53538";
     ctx.lineWidth = 3;
     ctx.strokeRect(x + 3, y + 3, w - 6, h - 6);
 
-    // 内部绘马木牌纹理
     ctx.fillStyle = "#c89b62";
     if (w > h) {
       for (let px = x + 12; px < x + w - 22; px += 22) {
@@ -377,7 +659,6 @@ class ShrineMap {
   _drawStoneLantern(ctx, x, y, w, h, timeSec) {
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
-    // 石灯笼屋顶
     ctx.fillStyle = "#4d5669";
     ctx.beginPath();
     ctx.roundRect(x + 2, y + 2, w - 4, h - 4, 9);
@@ -386,7 +667,6 @@ class ShrineMap {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // 中心灯火微光
     const flicker = 0.78 + Math.sin(timeSec * 8 + cx) * 0.18;
     const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, w * 0.75);
     glow.addColorStop(0, `rgba(255, 218, 128, ${0.85 * flicker})`);
@@ -404,13 +684,11 @@ class ShrineMap {
   }
 
   _drawCentralAltar(ctx, x, y, w, h, timeSec) {
-    // 神社神殿台基
     ctx.fillStyle = "#2b3042";
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 10);
     ctx.fill();
 
-    // 瓦片屋檐
     ctx.fillStyle = "#3a1e28";
     ctx.beginPath();
     ctx.roundRect(x + 8, y + 8, w - 16, h - 16, 8);
@@ -420,13 +698,11 @@ class ShrineMap {
     ctx.lineWidth = 3;
     ctx.strokeRect(x + 10, y + 10, w - 20, h - 20);
 
-    // 屋脊金色神社纹饰
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
     ctx.fillStyle = "#e5b54c";
     ctx.fillRect(x + 22, cy - 4, w - 44, 8);
 
-    // 两侧金色御神铃徽章
     const pulse = 0.75 + Math.sin(timeSec * 3) * 0.25;
     ctx.fillStyle = `rgba(255, 212, 102, ${pulse})`;
     ctx.beginPath();

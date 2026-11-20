@@ -159,7 +159,7 @@ class SoundEngine {
     sub.stop(now + 0.28);
   }
 
-  // 静音的金色铃铛声（支持音量与左右声道平移，pan in [-1, 1]）
+  // 雫音的金色铃铛声（支持音量与左右声道平移，pan in [-1, 1]）
   playShrineBell(volume = 0.24, pan = 0, pitchShift = 1.0) {
     if (!this.ctx || this.muted) return;
     const now = this.ctx.currentTime;
@@ -194,7 +194,7 @@ class SoundEngine {
     });
   }
 
-  // 静音被照退/识破时的魅惑狐鸣轻响
+  // 雫音被照退/识破时的魅惑狐鸣轻响
   playFoxRetreat() {
     if (!this.ctx || this.muted) return;
     const now = this.ctx.currentTime;
