@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>狐影零时 | Foxlight: 00:00 - 06:00</title>
+  <meta name="description" content="《狐影零时 | Foxlight: 00:00 - 06:00》——午夜神社手电筒潜行生存小游戏，支持电脑与手机游玩。" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 主游戏画布 -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- 危险心跳红边暗角叠加层 -->
+    <div id="dangerVignette"></div>
+
+    <!-- 顶部 HUD（游戏中显示） -->
+    <div id="hud" class="hidden">
+      <!-- 左上角：熊太的智能手表状态面板 -->
+      <div class="watch-hud" id="watchHud">
+        <div class="avatar-frame hero-avatar">
+          <img src="assets/hero_portrait.jpg" alt="三谷 熊太" />
+          <span class="avatar-tag">熊太</span>
+        </div>
+        <div class="watch-screen">
+          <div class="watch-top-row">
+            <span class="watch-time" id="hudTime">00:00</span>
+            <span class="watch-ampm">AM</span>
+            <span class="watch-phase" id="hudPhase">初入结界</span>
+          </div>
+          <div class="watch-mid-row">
+            <div class="battery-bar-wrap">
+              <div class="battery-icon-mini">⚡</div>
+              <div class="battery-track">
+                <div class="battery-fill" id="hudBatteryFill" style="width: 100%"></div>
+              </div>
+              <span class="battery-pct" id="hudBatteryText">100%</span>
+            </div>
+          </div>
+          <div class="watch-bot-row">
+            <div class="bpm-box" id="hudBpmBox">
+              <span class="heart-dot">♥</span>
+              <span id="hudBpm">72</span> <small>BPM</small>
+            </div>
+            <div class="light-status" id="hudLightStatus">手电: 开启</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 顶部中央：时间进度条与实时预警提示 -->
+      <div class="top-center-hud">
+        <div class="dawn-progress-wrap">
+          <span class="dawn-label">00:00</span>
+          <div class="dawn-track">
+            <div class="dawn-fill" id="hudDawnFill" style="width: 0%"></div>
+          </div>
+          <span class="dawn-label">06:00</span>
+        </div>
+        <div id="toastBanner" class="toast-banner"></div>
+      </div>
+
+      <!-- 右上角：静音状态预警 + 静音/暂停按钮 -->
+      <div class="top-right-hud">
+        <div class="shizune-alert" id="shizuneAlert">
+          <div class="avatar-frame shizune-avatar">
+            <img src="assets/shizune_portrait.jpg" alt="稻荷姬 静音" />
+          </div>
+          <div class="shizune-alert-text" id="shizuneAlertText">铃音渐近…</div>
+        </div>
+        <div class="hud-tools">
+          <button id="btnAudio" class="icon-btn" title="音效开关" aria-label="音效开关">🔊</button>
+          <button id="btnPause" class="icon-btn" title="暂停游戏" aria-label="暂停游戏">⏸</button>
+        </div>
+      </div>
+
+      <!-- 桌面端底部技能与快捷键栏 -->
+      <div class="desktop-skillbar" id="desktopSkillbar">
+        <div class="skill-card" id="pcFlashSkill">
+          <img src="assets/flash_icon.jpg" alt="强光爆闪" class="skill-img" />
+          <div class="skill-cd-overlay" id="pcFlashCd"></div>
+          <div class="skill-meta">
+            <span class="skill-name">强光爆闪</span>
+            <span class="skill-key">左键 / Space · -20%电</span>
+          </div>
+        </div>
+        <div class="skill-card compact" id="pcToggleSkill">
+          <div class="skill-emoji">🔦</div>
+          <div class="skill-meta">
+            <span class="skill-name">手电开关</span>
+            <span class="skill-key">右键 / F</span>
+          </div>
+        </div>
+        <div class="skill-card compact info-only">
+          <div class="skill-emoji">🔋</div>
+          <div class="skill-meta">
+            <span class="skill-name">已拾取电池</span>
+            <span class="skill-key" id="hudBatteryCount">0 颗</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 移动端双摇杆 + 技能按钮控制层 -->
+    <div id="mobileControls" class="hidden">
+      <!-- 左侧移动摇杆区 -->
+      <div class="stick-zone left-zone" id="moveStickZone">
+        <div class="stick-base" id="moveStickBase">
+          <div class="stick-knob" id="moveStickKnob"></div>
+        </div>
+        <span class="stick-hint">移动</span>
+      </div>
+
+      <!-- 右侧手电方向摇杆 + 按钮区 -->
+      <div class="right-control-cluster">
+        <div class="mobile-action-row">
+          <button id="mobToggleBtn" class="mob-btn secondary" type="button">
+            <span>🔦</span>
+            <small id="mobToggleLabel">关灯</small>
+          </button>
+          <button id="mobFlashBtn" class="mob-btn primary" type="button">
+            <img src="assets/flash_icon.jpg" alt="爆闪" />
+            <div class="mob-cd-mask" id="mobFlashCd"></div>
+            <small>爆闪</small>
+          </button>
+        </div>
+        <div class="stick-zone right-zone" id="aimStickZone">
+          <div class="stick-base aim-base" id="aimStickBase">
+            <div class="stick-knob aim-knob" id="aimStickKnob"></div>
+          </div>
+          <span class="stick-hint">手电朝向</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 开始界面 Overlay -->
+    <div id="startScreen" class="overlay-screen">
+      <div class="bg-art" style="background-image: url('assets/title_bg.jpg')"></div>
+      <div class="bg-scrim"></div>
+      <div class="start-panel">
+        <div class="title-badge">MIDNIGHT SHRINE SURVIVAL</div>
+        <h1 class="game-title">狐影零时</h1>
+        <p class="game-subtitle">FOXLIGHT: 00:00 — 06:00</p>
+        <p class="story-blurb">
+          午夜零时，三谷熊太误入稻荷神社结界。<br />
+          狐巫女「稻荷姬 静音」正隐匿于掩体暗处准备偷袭——握紧手电筒、拾取电池，坚持到凌晨 6:00 破晓！
+        </p>
+
+        <div class="difficulty-row" id="difficultyRow">
+          <button class="diff-btn" data-diff="casual">轻松漫步<small>2分钟</small></button>
+          <button class="diff-btn active" data-diff="normal">午夜标准<small>3分钟</small></button>
+          <button class="diff-btn" data-diff="nightmare">神隐噩梦<small>3分钟·高能</small></button>
+        </div>
+
+        <div class="start-actions">
+          <button id="btnStartGame" class="btn-primary-glow">开始守夜 · START</button>
+          <button id="btnShowGuide" class="btn-secondary-glass">玩法说明</button>
+        </div>
+
+        <div class="quick-controls-hint">
+          <span>💻 电脑：WASD/方向键移动 · 鼠标瞄准 · 左键/空格爆闪 · 右键/F开关灯</span>
+          <span>📱 手机：左摇杆移动 · 右摇杆照手电 · 右侧按钮爆闪/关灯</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 玩法说明弹窗 -->
+    <div id="guideModal" class="overlay-screen hidden">
+      <div class="modal-card">
+        <h2>守夜指南 · HOW TO SURVIVE</h2>
+        <div class="guide-grid">
+          <div class="guide-item">
+            <h3>🔦 手电与驱散</h3>
+            <p>持续用手电光照亮静音约 0.6 秒，即可让她畏光撤离；照亮她藏身的灌木/屏风/鸟居也能提前把她逼出来！</p>
+          </div>
+          <div class="guide-item">
+            <h3>⚡ 强光爆闪反制</h3>
+            <p>消耗 20% 电量释放强光爆闪，可瞬间打断静音的近身扑击并令其眩晕 2.5 秒。危急时刻务必果断使用！</p>
+          </div>
+          <div class="guide-item">
+            <h3>🔋 电池与节电</h3>
+            <p>手电常亮会持续耗电，请及时拾取庭院中发光的电池（+35%电量）。安全时可短暂关灯节电，但关灯太久会让静音更敏锐。</p>
+          </div>
+          <div class="guide-item">
+            <h3>🔔 听铃音辨埋伏</h3>
+            <p>静音藏在掩体中时会露出晃动的红白狐尾、微弱金瞳并传出清脆铃声；02:00 后她还会释放“假狐火”诱你转身！</p>
+          </div>
+        </div>
+        <button id="btnCloseGuide" class="btn-primary-glow">明白了，返回</button>
+      </div>
+    </div>
+
+    <!-- 暂停弹窗 -->
+    <div id="pauseScreen" class="overlay-screen hidden">
+      <div class="modal-card compact-modal">
+        <h2>已暂停 · PAUSED</h2>
+        <p class="pause-sub" id="pauseStats">当前时间：00:00 AM</p>
+        <div class="modal-actions">
+          <button id="btnResume" class="btn-primary-glow">继续守夜</button>
+          <button id="btnRestartFromPause" class="btn-secondary-glass">重新开始</button>
+          <button id="btnBackTitle" class="btn-secondary-glass">返回主菜单</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 结算界面（胜利 / 捕获） -->
+    <div id="endScreen" class="overlay-screen hidden">
+      <div class="bg-art" id="endBgArt"></div>
+      <div class="bg-scrim end-scrim"></div>
+      <div class="end-panel">
+        <div class="end-badge" id="endBadge">CAUGHT IN THE SHRINE</div>
+        <h2 class="end-title" id="endTitle">被静音捉住了…</h2>
+        <p class="end-quote" id="endQuote">「呵呵……抓到你了呢，熊太君。天亮之前，就乖乖留在我身边吧♪」</p>
+        <div class="end-stats" id="endStats"></div>
+        <div class="end-actions">
+          <button id="btnPlayAgain" class="btn-primary-glow">再试一次</button>
+          <button id="btnEndToTitle" class="btn-secondary-glass">返回标题</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 核心脚本模块 -->
+  <script src="js/audio.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/lighting.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
