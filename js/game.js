@@ -128,9 +128,22 @@
       this.batteriesCollected = 0;
       this.flashUsedCount = 0;
 
+      // 性能节流与稳定性字段
+      this.isMobilePerf = this.input.isTouchDevice || window.innerWidth <= 820;
+      this._hudAccum = 0;
+      this._lastHudTimeStr = "";
+      this._lastHudBatteryPct = -1;
+      this._lastHudBpm = -1;
+      this._lastHudAlertText = "";
+
       this._bindUIEvents();
       this._handleResize();
       window.addEventListener("resize", () => this._handleResize());
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden && this.mode === "playing") {
+          this.togglePause();
+        }
+      });
 
       requestAnimationFrame((ts) => this._loop(ts));
     }
@@ -199,18 +212,20 @@
     }
 
     _handleResize() {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      this.viewW = window.innerWidth;
-      this.viewH = window.innerHeight;
-      this.canvas.width = Math.floor(this.viewW * dpr);
-      this.canvas.height = Math.floor(this.viewH * dpr);
+      this.viewW = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 360);
+      this.viewH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 640);
+      this.isMobilePerf = this.input.isTouchDevice || this.viewW <= 820;
+      // 移动端限制 DPR 上限 1.25（桌面端 1.75），避免高刷高分手机 Canvas 显存超限导致卡顿或直接崩溃退出
+      const maxDpr = this.isMobilePerf ? 1.25 : 1.75;
+      const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+      this.canvas.width = Math.max(1, Math.floor(this.viewW * dpr));
+      this.canvas.height = Math.max(1, Math.floor(this.viewH * dpr));
       this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      this.lighting.resize(this.viewW, this.viewH);
+      this.lighting.resize(this.viewW, this.viewH, this.isMobilePerf);
 
       // 根据设备自动显示或隐藏移动端摇杆（游戏中生效）
       if (this.mode === "playing") {
-        const showMob = this.input.isTouchDevice || this.viewW <= 820;
-        this.ui.mobileControls.classList.toggle("hidden", !showMob);
+        this.ui.mobileControls.classList.toggle("hidden", !this.isMobilePerf);
       }
     }
 
@@ -238,7 +253,9 @@
       this._spawnInitialBatteries();
 
       // 立即定位相机
-      this._updateCamera(1);
+      this._updateCamera();
+      this._hudAccum = 1;
+      this._updateHUD(0, Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y), performance.now());
 
       this.ui.startScreen.classList.add("hidden");
       this.ui.guideModal.classList.add("hidden");
@@ -285,6 +302,9 @@
       this.player.lightOn = !this.player.lightOn;
       this.sound.playClick(this.player.lightOn);
       this.ui.mobToggleLabel.textContent = this.player.lightOn ? "关灯" : "开灯";
+      if (!this.player.lightOn) {
+        this.showToast("手电已关闭！雫音察觉黑暗正在加速逼近！", true);
+      }
     }
 
     triggerFlashBurst() {
@@ -417,10 +437,18 @@
       const dt = Math.min(0.05, Math.max(0.001, rawDt));
       this.totalTimeSec += dt;
 
-      if (this.mode === "playing") {
-        this._updatePlaying(dt, ts);
+      try {
+        if (this.mode === "playing") {
+          this._updatePlaying(dt, ts);
+        }
+        // 非游戏标题界面/结算界面无需持续全屏跑高消耗光影渲染，彻底省电防发烫卡顿
+        if (this.mode === "playing" || this.mode === "paused") {
+          this._render();
+        }
+      } catch (err) {
+        // 捕获单帧异常防止游戏直接死机/闪退
+        console.error("[Foxlight] Frame error recovered:", err);
       }
-      this._render();
 
       requestAnimationFrame((nextTs) => this._loop(nextTs));
     }
@@ -585,30 +613,21 @@
         return;
       }
 
-      // 7. 相机跟随
-      this._updateCamera(dt * 8.5);
+      // 7. 视角严格固定在主角身上（主角始终处于屏幕正中央）
+      this._updateCamera();
 
-      // 8. 更新智能手表 HUD 与心跳危险度
-      this._updateHUD(dawnProgress, aiRes.distToPlayer, nowMs);
+      // 8. 更新智能手表 HUD 与心跳危险度（DOM 节流更新减少手机端重排掉帧）
+      this._hudAccum += dt;
+      if (this._hudAccum >= 0.08) {
+        this._hudAccum = 0;
+        this._updateHUD(dawnProgress, aiRes.distToPlayer, nowMs);
+      }
     }
 
-    _updateCamera(lerpFactor) {
-      const t = Math.min(1, lerpFactor);
-      // 相机向手电朝向轻微前探，让前方视野更宽广
-      const lookAheadX = Math.cos(this.player.aimAngle) * 58;
-      const lookAheadY = Math.sin(this.player.aimAngle) * 58;
-      let targetX = this.player.x + lookAheadX - this.viewW * 0.5;
-      let targetY = this.player.y + lookAheadY - this.viewH * 0.5;
-
-      // 边界钳制
-      targetX = Math.max(0, Math.min(Math.max(0, this.map.width - this.viewW), targetX));
-      targetY = Math.max(0, Math.min(Math.max(0, this.map.height - this.viewH), targetY));
-
-      if (this.map.width < this.viewW) targetX = -(this.viewW - this.map.width) * 0.5;
-      if (this.map.height < this.viewH) targetY = -(this.viewH - this.map.height) * 0.5;
-
-      this.camX += (targetX - this.camX) * t;
-      this.camY += (targetY - this.camY) * t;
+    _updateCamera() {
+      // 主角始终严格锁定在屏幕正中央 (viewW * 0.5, viewH * 0.5)
+      this.camX = this.player.x - this.viewW * 0.5;
+      this.camY = this.player.y - this.viewH * 0.5;
     }
 
     _updateHUD(dawnProgress, distToShizune, nowMs) {
@@ -658,17 +677,26 @@
       this.sound.updateHeartbeat(nowMs, bpm, totalDanger);
 
       // 右上角雫音预警条
+      let alertActive = false;
+      let alertText = "";
       if (this.shizune.state === "ambush") {
-        this.ui.shizuneAlert.classList.add("active");
-        this.ui.shizuneAlertText.textContent = "突袭扑来！快用强光！";
+        alertActive = true;
+        alertText = this.shizune.isDarkHunting ? "黑暗狂猎！雫音高速扑来！" : "突袭扑来！快用强光！";
+      } else if (this.shizune.isDarkHunting && distToShizune < 480 && this.shizune.state !== "retreat") {
+        alertActive = true;
+        alertText = "关灯危险！雫音正循声急追！";
       } else if (this.shizune.state === "hiding" && distToShizune < 380) {
-        this.ui.shizuneAlert.classList.add("active");
-        this.ui.shizuneAlertText.textContent = "附近掩体有铃音晃动…";
+        alertActive = true;
+        alertText = "附近掩体有铃音晃动…";
       } else if (distToShizune < 300 && this.shizune.state !== "retreat") {
-        this.ui.shizuneAlert.classList.add("active");
-        this.ui.shizuneAlertText.textContent = "气息就在近处！";
-      } else {
-        this.ui.shizuneAlert.classList.remove("active");
+        alertActive = true;
+        alertText = "气息就在近处！";
+      }
+
+      this.ui.shizuneAlert.classList.toggle("active", alertActive);
+      if (alertActive && alertText !== this._lastHudAlertText) {
+        this._lastHudAlertText = alertText;
+        this.ui.shizuneAlertText.textContent = alertText;
       }
     }
 
@@ -711,9 +739,9 @@
       // 5. 绘制女主角「稻荷姬 雫音」
       this.shizune.draw(ctx, this.totalTimeSec);
 
-      // 6. 绘制神社障碍掩体（在角色之上或同层，带晃动与隐藏狐尾线索）
+      // 6. 绘制神社障碍掩体（带视口剔除，提升手机帧率）
       const hidingId = this.shizune.state === "hiding" && this.shizune.hidingObstacle ? this.shizune.hidingObstacle.id : null;
-      this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0);
+      this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, this.viewW, this.viewH);
 
       // 7. 绘制粒子特效
       for (const p of this.particles) {

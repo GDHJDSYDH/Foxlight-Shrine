@@ -19,6 +19,11 @@ class ShrineMap {
     this.gridCols = Math.ceil(this.width / this.cellSize);
     this.gridRows = Math.ceil(this.height / this.cellSize);
     this.navGrid = new Uint8Array(this.gridCols * this.gridRows);
+    // 预分配 A* 缓冲区，避免每次寻路重复 new TypedArray 造成移动端 GC 卡顿与内存抖动
+    const totalCells = this.gridCols * this.gridRows;
+    this._aStarG = new Float32Array(totalCells);
+    this._aStarFrom = new Int32Array(totalCells);
+    this._aStarClosed = new Uint8Array(totalCells);
     this._buildNavGrid();
   }
 
@@ -213,15 +218,15 @@ class ShrineMap {
     }
 
     const cols = this.gridCols;
-    const total = cols * this.gridRows;
     const startIdx = start.r * cols + start.c;
     const goalIdx = goal.r * cols + goal.c;
 
-    const gScore = new Float32Array(total);
+    const gScore = this._aStarG;
     gScore.fill(1e9);
-    const cameFrom = new Int32Array(total);
+    const cameFrom = this._aStarFrom;
     cameFrom.fill(-1);
-    const closed = new Uint8Array(total);
+    const closed = this._aStarClosed;
+    closed.fill(0);
 
     // 轻量二叉最小堆，保证 <0.3ms 寻路耗时
     const heapIdx = [];
@@ -504,8 +509,8 @@ class ShrineMap {
     return t0 <= t1;
   }
 
-  // 绘制神社庭院掩体与场景装饰
-  drawObstacles(ctx, timeSec, hidingObstacleId, shizuneAlertGlow) {
+  // 绘制神社庭院掩体与场景装饰（带视口剔除，移动端只绘制屏幕可见范围内的障碍物）
+  drawObstacles(ctx, timeSec, hidingObstacleId, shizuneAlertGlow, camX = 0, camY = 0, viewW = 9999, viewH = 9999) {
     ctx.save();
     ctx.fillStyle = "#161926";
     ctx.fillRect(0, 0, this.width, this.wallThickness);
@@ -528,7 +533,14 @@ class ShrineMap {
     ctx.strokeRect(this.wallThickness, this.height * 0.5 - 65, this.width - this.wallThickness * 2, 130);
     ctx.restore();
 
+    const cullMargin = 72;
+    const minVx = camX - cullMargin;
+    const maxVx = camX + viewW + cullMargin;
+    const minVy = camY - cullMargin;
+    const maxVy = camY + viewH + cullMargin;
+
     for (const o of this.obstacles) {
+      if (o.x + o.w < minVx || o.x > maxVx || o.y + o.h < minVy || o.y > maxVy) continue;
       ctx.save();
 
       let ox = o.x;
@@ -539,9 +551,7 @@ class ShrineMap {
       }
 
       ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
-      ctx.beginPath();
-      ctx.roundRect(ox + 6, oy + 8, o.w, o.h, 8);
-      ctx.fill();
+      this._fillRoundRect(ctx, ox + 6, oy + 8, o.w, o.h, 8);
 
       if (o.type === "bush") {
         this._drawBush(ctx, ox, oy, o.w, o.h, timeSec, o.id === hidingObstacleId ? shizuneAlertGlow : 0);
@@ -559,14 +569,29 @@ class ShrineMap {
     }
   }
 
+  // 兼容旧版 Safari / 安卓 WebView 的圆角矩形绘制（避免 ctx.roundRect 不存在直接报错崩退）
+  _fillRoundRect(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w * 0.5, h * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   _drawBush(ctx, x, y, w, h, timeSec, hideGlow) {
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
 
     ctx.fillStyle = "#162d26";
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 24);
-    ctx.fill();
+    this._fillRoundRect(ctx, x, y, w, h, 24);
 
     const puffs = [
       { dx: -0.26, dy: -0.18, r: 0.34, c: "#1d3d32" },
@@ -612,9 +637,7 @@ class ShrineMap {
 
   _drawToriiPillar(ctx, x, y, w, h) {
     ctx.fillStyle = "#343b4c";
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 8);
-    ctx.fill();
+    this._fillRoundRect(ctx, x, y, w, h, 8);
 
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
@@ -636,9 +659,7 @@ class ShrineMap {
 
   _drawShrineScreen(ctx, x, y, w, h) {
     ctx.fillStyle = "#4d2724";
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 6);
-    ctx.fill();
+    this._fillRoundRect(ctx, x, y, w, h, 6);
 
     ctx.strokeStyle = "#b53538";
     ctx.lineWidth = 3;
@@ -660,9 +681,7 @@ class ShrineMap {
     const cx = x + w * 0.5;
     const cy = y + h * 0.5;
     ctx.fillStyle = "#4d5669";
-    ctx.beginPath();
-    ctx.roundRect(x + 2, y + 2, w - 4, h - 4, 9);
-    ctx.fill();
+    this._fillRoundRect(ctx, x + 2, y + 2, w - 4, h - 4, 9);
     ctx.strokeStyle = "#76829b";
     ctx.lineWidth = 2;
     ctx.stroke();
@@ -685,14 +704,10 @@ class ShrineMap {
 
   _drawCentralAltar(ctx, x, y, w, h, timeSec) {
     ctx.fillStyle = "#2b3042";
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 10);
-    ctx.fill();
+    this._fillRoundRect(ctx, x, y, w, h, 10);
 
     ctx.fillStyle = "#3a1e28";
-    ctx.beginPath();
-    ctx.roundRect(x + 8, y + 8, w - 16, h - 16, 8);
-    ctx.fill();
+    this._fillRoundRect(ctx, x + 8, y + 8, w - 16, h - 16, 8);
 
     ctx.strokeStyle = "#cf3b42";
     ctx.lineWidth = 3;

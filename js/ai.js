@@ -151,8 +151,16 @@ class ShizuneAI {
     // 阶段难度加成（00:00 -> 06:00 平滑提升）
     const hour = gameState.dawnProgress * 6;
     const stageMult = 1 + Math.min(0.42, hour * 0.068);
-    const darkOffBonus = player.lightOffDuration > 3.5 ? 1.24 : 1.0;
-    const baseSpeed = this.cfg.shizuneSpeed * stageMult * darkOffBonus;
+
+    // 暗夜猎杀模式：主角手电筒关闭（或没电）时，雫音立刻变得极具攻击性！
+    const isLightOff = !player.lightOn || player.battery <= 0.1;
+    let darkAggroMult = 1.0;
+    if (isLightOff) {
+      // 关灯瞬间移速 +20%，持续关灯超过 2 秒最高叠加到 +42%！
+      darkAggroMult = 1.2 + Math.min(0.22, player.lightOffDuration * 0.09);
+    }
+    const baseSpeed = this.cfg.shizuneSpeed * stageMult * darkAggroMult;
+    this.isDarkHunting = isLightOff;
 
     const dxToPlayer = player.x - this.x;
     const dyToPlayer = player.y - this.y;
@@ -268,53 +276,69 @@ class ShizuneAI {
         : null;
 
     // =========================================================================
-    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 反卡墙）
+    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 反卡墙）
     // =========================================================================
     if (this.state === "stalk") {
-      // 若被手电刚照到且还没被驱散，立刻机敏侧闪找最近阴影掩体！
-      if (lit && this.litExposure > 0.25 && Math.random() < dt * 3.5) {
-        const quickCover = this._pickBestCover(player, true);
-        if (quickCover) {
-          this.hidingObstacle = quickCover;
-          this.state = "seek_cover";
-          this.stateTimer = 4.5;
-          this.path = [];
-          this.pathRecalcTimer = 0;
+      // 【关灯狂猎模式】：主角关灯/没电时，雫音不再瞻前顾后躲掩体，而是锁定气味直接高速扑杀！
+      if (isLightOff) {
+        const clearCharge = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
+        if (distToPlayer < 380 && this.ambushCooldown <= 0 && (clearCharge || distToPlayer < 260)) {
+          this._startAmbush(player, sound, pan, gameState, true);
+        } else {
+          // 暗处高频刷新 A* 路径，直线压缩距离紧逼主角
+          this._navigateTo(player.x, player.y, baseSpeed * 1.18, dt, null, 0.22);
         }
-      }
-
-      // 在中距离主动挑选掩体潜伏偷袭
-      if (this.state === "stalk" && distToPlayer < 480 && distToPlayer > 170 && this.ambushCooldown <= 0 && Math.random() < dt * 0.95) {
-        const cover = this._pickBestCover(player, false);
-        if (cover) {
-          this.hidingObstacle = cover;
-          this.state = "seek_cover";
-          this.stateTimer = 5.0;
-          this.path = [];
-          this.pathRecalcTimer = 0;
-        }
-      }
-
-      // 如果玩家背对着自己且已经很近且之间无墙阻挡，直接发动背后突袭！
-      const playerLookingAtMe = this._isPlayerFacingPoint(player, this.x, this.y, 0.92);
-      const clearChargePath = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
-      if (this.state === "stalk" && distToPlayer < 260 && !playerLookingAtMe && clearChargePath && this.ambushCooldown <= 0) {
-        this._startAmbush(player, sound, pan, gameState);
-      } else if (this.state === "stalk") {
-        // 目标点不是傻傻直奔男主正脸，而是瞄准男主背后或侧后盲区（包抄点）
-        let targetX = player.x;
-        let targetY = player.y;
-        if (distToPlayer > 155 && avoidBeam) {
-          const behindAngle = player.aimAngle + Math.PI + this.flankSide * 0.55;
-          const offsetDist = Math.min(185, distToPlayer * 0.55);
-          targetX = Math.max(this.map.minX + 40, Math.min(this.map.maxX - 40, player.x + Math.cos(behindAngle) * offsetDist));
-          targetY = Math.max(this.map.minY + 40, Math.min(this.map.maxY - 40, player.y + Math.sin(behindAngle) * offsetDist));
+      } else {
+        // 若被手电刚照到且还没被驱散，立刻机敏侧闪找最近阴影掩体！
+        if (lit && this.litExposure > 0.25 && Math.random() < dt * 3.5) {
+          const quickCover = this._pickBestCover(player, true);
+          if (quickCover) {
+            this.hidingObstacle = quickCover;
+            this.state = "seek_cover";
+            this.stateTimer = 4.5;
+            this.path = [];
+            this.pathRecalcTimer = 0;
+          }
         }
 
-        this._navigateTo(targetX, targetY, baseSpeed * (lit ? 0.82 : 1.05), dt, avoidBeam);
+        // 在中距离主动挑选掩体潜伏偷袭
+        if (this.state === "stalk" && distToPlayer < 480 && distToPlayer > 170 && this.ambushCooldown <= 0 && Math.random() < dt * 0.95) {
+          const cover = this._pickBestCover(player, false);
+          if (cover) {
+            this.hidingObstacle = cover;
+            this.state = "seek_cover";
+            this.stateTimer = 5.0;
+            this.path = [];
+            this.pathRecalcTimer = 0;
+          }
+        }
+
+        // 如果玩家背对着自己且已经很近且之间无墙阻挡，直接发动背后突袭！
+        const playerLookingAtMe = this._isPlayerFacingPoint(player, this.x, this.y, 0.92);
+        const clearChargePath = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
+        if (this.state === "stalk" && distToPlayer < 260 && !playerLookingAtMe && clearChargePath && this.ambushCooldown <= 0) {
+          this._startAmbush(player, sound, pan, gameState, false);
+        } else if (this.state === "stalk") {
+          // 目标点不是傻傻直奔男主正脸，而是瞄准男主背后或侧后盲区（包抄点）
+          let targetX = player.x;
+          let targetY = player.y;
+          if (distToPlayer > 155 && avoidBeam) {
+            const behindAngle = player.aimAngle + Math.PI + this.flankSide * 0.55;
+            const offsetDist = Math.min(185, distToPlayer * 0.55);
+            targetX = Math.max(this.map.minX + 40, Math.min(this.map.maxX - 40, player.x + Math.cos(behindAngle) * offsetDist));
+            targetY = Math.max(this.map.minY + 40, Math.min(this.map.maxY - 40, player.y + Math.sin(behindAngle) * offsetDist));
+          }
+
+          this._navigateTo(targetX, targetY, baseSpeed * (lit ? 0.82 : 1.05), dt, avoidBeam);
+        }
       }
     } else if (this.state === "seek_cover") {
-      if (!this.hidingObstacle || this.stateTimer <= 0) {
+      // 主角一旦关灯，正在赶往掩体的雫音立即放弃躲藏转为直接猎杀！
+      if (isLightOff) {
+        this.hidingObstacle = null;
+        this.state = "stalk";
+        this.path = [];
+      } else if (!this.hidingObstacle || this.stateTimer <= 0) {
         this.hidingObstacle = null;
         this.state = "stalk";
         this.path = [];
@@ -334,6 +358,15 @@ class ShizuneAI {
     } else if (this.state === "hiding") {
       if (!this.hidingObstacle) {
         this.state = "stalk";
+      } else if (isLightOff) {
+        // 躲在掩体里的雫音发现主角关灯，距离较近直接暴起突袭，较远则立刻出击追猎！
+        if (distToPlayer < 420) {
+          this._startAmbush(player, sound, pan, gameState, true);
+        } else {
+          this.hidingObstacle = null;
+          this.state = "stalk";
+          this.path = [];
+        }
       } else {
         // 机敏绕掩体滑步：男主绕过来时，雫音会绕着掩体另一侧平滑躲开，而不是卡在墙角
         const spot = this.map.getHidingSpotBehind(this.hidingObstacle, player.x, player.y, 30);
@@ -349,7 +382,7 @@ class ShizuneAI {
 
         const playerLookingAtCover = this._isPlayerFacingPoint(player, this.hidingObstacle.cx, this.hidingObstacle.cy, 0.72);
         if ((distToPlayer < 295 && !playerLookingAtCover) || distToPlayer < 165) {
-          this._startAmbush(player, sound, pan, gameState);
+          this._startAmbush(player, sound, pan, gameState, false);
         } else if (this.stateTimer <= 0 || distToPlayer > 620) {
           this.hidingObstacle = null;
           this.state = "stalk";
@@ -357,23 +390,28 @@ class ShizuneAI {
         }
       }
     } else if (this.state === "ambush") {
-      // 高速突袭扑击：使用 A* 精准绕过掩体边角扑向男主，绝不傻傻顶在掩体正面卡住！
-      this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.65 });
-      const speed = baseSpeed * 1.72 * (lit ? 0.72 : 1.0);
+      // 高速突袭扑击：关灯期间残影更密集、追击范围更大、冷却更短！
+      if (this.afterimages.length < 10) {
+        this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.65 });
+      }
+      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * (lit ? 0.72 : 1.0);
       this._navigateTo(player.x, player.y, speed, dt, null, 0.18);
 
-      if (this.stateTimer <= 0 || distToPlayer > 500) {
-        this.ambushCooldown = Math.max(2.0, 4.2 - hour * 0.35);
+      const maxChaseDist = isLightOff ? 640 : 500;
+      if (this.stateTimer <= 0 || distToPlayer > maxChaseDist) {
+        this.ambushCooldown = isLightOff ? Math.max(0.9, 1.8 - hour * 0.15) : Math.max(2.0, 4.2 - hour * 0.35);
         this.state = "stalk";
         this.path = [];
       }
     } else if (this.state === "retreat") {
       // 化作狐火流光沿 A* 路径高速撤回暗处
-      this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.55 });
+      if (this.afterimages.length < 8) {
+        this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.55 });
+      }
       const d = Math.hypot(this.retreatTarget.x - this.x, this.retreatTarget.y - this.y);
       if (d < 38 || this.stateTimer <= 0) {
         this.state = "stalk";
-        this.ambushCooldown = 1.8;
+        this.ambushCooldown = isLightOff ? 0.8 : 1.8;
         this.path = [];
       } else {
         this._navigateTo(this.retreatTarget.x, this.retreatTarget.y, baseSpeed * 1.95, dt, avoidBeam, 0.35);
@@ -512,15 +550,18 @@ class ShizuneAI {
     }
   }
 
-  _startAmbush(player, sound, pan, gameState) {
+  _startAmbush(player, sound, pan, gameState, fromDarkHunt = false) {
     this.state = "ambush";
-    this.stateTimer = 2.25;
+    this.stateTimer = fromDarkHunt ? 2.85 : 2.25;
     this.hidingObstacle = null;
     this.path = [];
     this.pathRecalcTimer = 0;
     this.ambushTarget = { x: player.x, y: player.y };
     sound.playAmbushCue(pan);
-    gameState.onToast("叮铃——！雫音正从暗处扑来！", true);
+    gameState.onToast(
+      fromDarkHunt ? "手电已灭！雫音借着黑暗高速扑来了！" : "叮铃——！雫音正从暗处扑来！",
+      true
+    );
   }
 
   _enterRetreat(player, spawnParticles) {
@@ -710,16 +751,19 @@ class ShizuneAI {
       ctx.restore();
     }
 
-    // 5. 发光金色狐瞳
+    // 5. 发光金色狐瞳（移除 shadowBlur 减少移动端 GPU 卡顿，改用双层柔光圆环）
     if (this.state !== "stunned") {
-      ctx.fillStyle = "#ffd644";
-      ctx.shadowColor = "#ffaa00";
-      ctx.shadowBlur = 8;
+      ctx.fillStyle = this.isDarkHunting ? "rgba(255, 68, 92, 0.45)" : "rgba(255, 170, 0, 0.42)";
+      ctx.beginPath();
+      ctx.arc(10.5, -4, 4.4, 0, Math.PI * 2);
+      ctx.arc(10.5, 4, 4.4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = this.isDarkHunting ? "#ff5268" : "#ffd644";
       ctx.beginPath();
       ctx.arc(10.5, -4, 2.2, 0, Math.PI * 2);
       ctx.arc(10.5, 4, 2.2, 0, Math.PI * 2);
       ctx.fill();
-      ctx.shadowBlur = 0;
     }
 
     ctx.restore();
@@ -758,15 +802,21 @@ class ShizuneAI {
     const blink = Math.sin(timeSec * 4.5);
     if (this.state === "hiding" && blink < 0.25) return;
 
-    const alpha = this.state === "ambush" ? 0.95 : Math.max(0.18, (1 - distToPlayer / 460) * 0.85);
+    const alpha = this.state === "ambush" || this.isDarkHunting ? 0.95 : Math.max(0.18, (1 - distToPlayer / 460) * 0.85);
     ctx.save();
     ctx.translate(this.x, this.y);
     ctx.rotate(this.facingAngle);
     ctx.globalAlpha = alpha;
-    ctx.fillStyle = "#ffcf33";
-    ctx.shadowColor = "#ff7b00";
-    ctx.shadowBlur = 12;
 
+    // 关灯狂猎时双瞳泛起危险绯红金芒（不用 shadowBlur 避免移动端掉帧）
+    ctx.fillStyle = this.isDarkHunting ? "rgba(255, 58, 86, 0.42)" : "rgba(255, 130, 0, 0.36)";
+    for (const ey of [-4.2, 4.2]) {
+      ctx.beginPath();
+      ctx.ellipse(9, ey, 6.2, 3.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = this.isDarkHunting ? "#ff687c" : "#ffcf33";
     for (const ey of [-4.2, 4.2]) {
       ctx.beginPath();
       ctx.ellipse(9, ey, 3.2, 1.5, 0, 0, Math.PI * 2);

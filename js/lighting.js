@@ -9,13 +9,18 @@ class LightingSystem {
   constructor() {
     this.maskCanvas = document.createElement("canvas");
     this.maskCtx = this.maskCanvas.getContext("2d");
-    this.rayCount = 84;
-    this.selfRayCount = 56;
+    this.isMobile = false;
+    this.rayCount = 72;
+    this.selfRayCount = 48;
   }
 
-  resize(width, height) {
-    const scale = width > 1000 ? 0.85 : 0.75;
+  resize(width, height, isMobile = false) {
+    this.isMobile = isMobile;
+    // 移动端显著降低离屏光影遮罩分辨率（线性插值放大时边缘依然柔和），大幅减负 GPU 填充率，避免掉帧与 OOM 闪退
+    const scale = isMobile ? 0.45 : width > 1000 ? 0.72 : 0.62;
     this.scale = scale;
+    this.rayCount = isMobile ? 48 : 72;
+    this.selfRayCount = isMobile ? 32 : 48;
     this.maskCanvas.width = Math.max(1, Math.floor(width * scale));
     this.maskCanvas.height = Math.max(1, Math.floor(height * scale));
   }
@@ -392,11 +397,16 @@ class LightingSystem {
   }
 
   _renderFogLayer(ctx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor) {
-    // 1. 世界空间中的局部漂浮浓雾区
+    // 1. 世界空间中的局部漂浮浓雾区（带屏幕视口剔除）
     if (fogZones && fogZones.length > 0) {
       ctx.save();
       ctx.translate(-camX, -camY);
       for (const f of fogZones) {
+        const sx = f.x - camX;
+        const sy = f.y - camY;
+        if (sx + f.radius < -40 || sx - f.radius > viewW + 40 || sy + f.radius < -40 || sy - f.radius > viewH + 40) {
+          continue;
+        }
         const pulse = 0.85 + Math.sin(timeSec * 1.1 + f.phase) * 0.15;
         const r = f.radius * pulse;
         const grad = ctx.createRadialGradient(f.x, f.y, r * 0.12, f.x, f.y, r);
@@ -429,22 +439,24 @@ class LightingSystem {
     ctx.fillStyle = ringGrad;
     ctx.fillRect(0, 0, viewW, viewH);
 
-    // 缓缓横飘的半透明薄雾丝缕（增加空间流动感）
+    // 缓缓横飘的半透明薄雾丝缕（移动端仅保留单层以节省填充开销）
     const drift1 = ((timeSec * 22) % (viewW + 420)) - 210;
-    const drift2 = viewW - (((timeSec * 16 + 260) % (viewW + 420)) - 210);
     const wispAlpha = (0.08 + inFogFactor * 0.14 + Math.min(0.08, hour * 0.015)).toFixed(3);
 
-    const w1 = ctx.createRadialGradient(drift1, viewH * 0.32, 20, drift1, viewH * 0.32, 260);
+    const w1 = ctx.createRadialGradient(drift1, viewH * 0.32, 20, drift1, viewH * 0.32, 240);
     w1.addColorStop(0, `rgba(165, 190, 232, ${wispAlpha})`);
     w1.addColorStop(1, "rgba(165, 190, 232, 0)");
     ctx.fillStyle = w1;
     ctx.fillRect(0, 0, viewW, viewH);
 
-    const w2 = ctx.createRadialGradient(drift2, viewH * 0.72, 20, drift2, viewH * 0.72, 290);
-    w2.addColorStop(0, `rgba(145, 168, 215, ${wispAlpha})`);
-    w2.addColorStop(1, "rgba(145, 168, 215, 0)");
-    ctx.fillStyle = w2;
-    ctx.fillRect(0, 0, viewW, viewH);
+    if (!this.isMobile) {
+      const drift2 = viewW - (((timeSec * 16 + 260) % (viewW + 420)) - 210);
+      const w2 = ctx.createRadialGradient(drift2, viewH * 0.72, 20, drift2, viewH * 0.72, 270);
+      w2.addColorStop(0, `rgba(145, 168, 215, ${wispAlpha})`);
+      w2.addColorStop(1, "rgba(145, 168, 215, 0)");
+      ctx.fillStyle = w2;
+      ctx.fillRect(0, 0, viewW, viewH);
+    }
     ctx.restore();
   }
 }

@@ -111,7 +111,9 @@ class InputController {
         this.isTouchDevice = true;
         stickObj.active = true;
         stickObj.pointerId = e.pointerId;
-        zone.setPointerCapture(e.pointerId);
+        try {
+          if (zone.setPointerCapture) zone.setPointerCapture(e.pointerId);
+        } catch (_err) {}
         updateFromPoint(e.clientX, e.clientY);
       });
 
