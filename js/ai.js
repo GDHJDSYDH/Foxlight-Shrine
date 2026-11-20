@@ -94,12 +94,12 @@ class ShizuneAI {
     const maxRange = (effectiveRange || player.lightRange) * 1.42;
     if (dist > maxRange) return false;
 
-    const angleTo = Math.atan2(dy, dx);
-    let diff = angleTo - player.aimAngle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-
-    if (Math.abs(diff) > player.lightHalfFov * 1.45) return false;
+    // 极近距离（< 42px）无视微小角度偏差直接判定爆闪命中，避免贴脸爆闪反而失效
+    if (dist > 42) {
+      const angleTo = Math.atan2(dy, dx);
+      const diff = Math.atan2(Math.sin(angleTo - player.aimAngle), Math.cos(angleTo - player.aimAngle));
+      if (Math.abs(diff) > player.lightHalfFov * 1.45) return false;
+    }
 
     // 严格视线检查：绝不穿墙！仅当玩家直线可见雫音，或雫音正躲在该掩体且玩家与掩体间无其它阻挡时才生效
     let hit = this.map.hasLineOfSight(player.x, player.y, this.x, this.y, null);
@@ -121,9 +121,10 @@ class ShizuneAI {
     this.path = [];
     this.repelCount += 1;
 
-    const len = dist || 1;
-    this.x += (dx / len) * 48;
-    this.y += (dy / len) * 48;
+    // 柔和击退（防止贴脸时 dist≈0 导致除零或弹出边界）
+    const pushAngle = dist > 1 ? Math.atan2(dy, dx) : player.aimAngle;
+    this.x += Math.cos(pushAngle) * 48;
+    this.y += Math.sin(pushAngle) * 48;
     this.map.resolveCircleCollisions(this);
 
     sound.playFoxRetreat();
@@ -142,10 +143,20 @@ class ShizuneAI {
       this.flankSide = -this.flankSide;
     }
 
-    // 清理残影
+    // 清理残影（硬上限 12 个防止高频帧累积）
     for (let i = this.afterimages.length - 1; i >= 0; i--) {
       this.afterimages[i].alpha -= dt * 2.4;
       if (this.afterimages[i].alpha <= 0) this.afterimages.splice(i, 1);
+    }
+    if (this.afterimages.length > 12) {
+      this.afterimages.splice(0, this.afterimages.length - 12);
+    }
+
+    // 坐标安全自愈：防止极端浮点异常污染游戏状态
+    if (!Number.isFinite(this.x) || !Number.isFinite(this.y)) {
+      this.x = 180;
+      this.y = 180;
+      this.path = [];
     }
 
     // 阶段难度加成（00:00 -> 06:00 平滑提升）
@@ -217,7 +228,7 @@ class ShizuneAI {
       return { caught: false, distToPlayer };
     }
 
-    // 畏光累计判定（撤退状态中不重复累计）
+    // 若已在掩体后被手电反复照亮驱散，先检查距离防止同帧被判捕获；并增加防死循环保护
     if (this.state !== "retreat") {
       const requiredTime = hour >= 4 ? 0.85 : 0.62;
       if (lit) {
@@ -437,11 +448,13 @@ class ShizuneAI {
       this.lastCheckPos.y = this.y;
     }
 
-    // 捕获判定
+    // 若在极近距离正被手电筒持续照射（lit && litExposure > 0.35），稍微延长判定容忍避免“明明已经照到了却瞬间死掉”
+    // 同时防止在被驱散同一帧误触捕获
+    const catchDist = player.radius + this.radius - 4;
     const caught =
       this.state !== "retreat" &&
       this.state !== "stunned" &&
-      Math.hypot(player.x - this.x, player.y - this.y) < player.radius + this.radius - 3;
+      distToPlayer < catchDist;
 
     return { caught, distToPlayer };
   }
@@ -515,10 +528,11 @@ class ShizuneAI {
     const actualDy = this.y - prevY;
     if (Math.hypot(actualDx, actualDy) > 0.25) {
       const targetFace = Math.atan2(actualDy, actualDx);
-      let diff = targetFace - this.facingAngle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
+      const diff = Math.atan2(Math.sin(targetFace - this.facingAngle), Math.cos(targetFace - this.facingAngle));
       this.facingAngle += diff * Math.min(1, dt * 14);
+      // 保持 facingAngle 始终归一化在 [-PI, PI]，避免长期累加溢出
+      if (!Number.isFinite(this.facingAngle)) this.facingAngle = 0;
+      else this.facingAngle = Math.atan2(Math.sin(this.facingAngle), Math.cos(this.facingAngle));
     }
   }
 
@@ -632,9 +646,7 @@ class ShizuneAI {
 
   _isPlayerFacingPoint(player, tx, ty, thresholdRad) {
     const a = Math.atan2(ty - player.y, tx - player.x);
-    let diff = a - player.aimAngle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
+    const diff = Math.atan2(Math.sin(a - player.aimAngle), Math.cos(a - player.aimAngle));
     return Math.abs(diff) < thresholdRad;
   }
 

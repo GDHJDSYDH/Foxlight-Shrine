@@ -210,6 +210,7 @@ class SoundEngine {
       }
       outNode.connect(this.masterGain);
 
+      // 使用安全定时器或 onended 释放节点，避免部分手机浏览器高频触发时音频图节点堆积
       let remaining = 4;
       const onOneDone = (osc, gain) => {
         try {
@@ -244,7 +245,7 @@ class SoundEngine {
     } catch (_e) {}
   }
 
-  // 雫音被照退/识破时的魅惑狐鸣轻响
+  // 雫音被照退/识破时的魅惑狐鸣轻响（兼容 Safari/iOS WebAudio 顺序 Ramp，绝不触发非法调度）
   playFoxRetreat() {
     if (!this._canPlay()) return;
     try {
@@ -253,8 +254,8 @@ class SoundEngine {
       const gain = this.ctx.createGain();
       osc.type = "sine";
       osc.frequency.setValueAtTime(780, now);
-      osc.frequency.exponentialRampToValueAtTime(1180, now + 0.12);
-      osc.frequency.exponentialRampToValueAtTime(520, now + 0.36);
+      osc.frequency.linearRampToValueAtTime(1180, now + 0.12);
+      osc.frequency.linearRampToValueAtTime(520, now + 0.36);
 
       gain.gain.setValueAtTime(0.001, now);
       gain.gain.linearRampToValueAtTime(0.18, now + 0.04);

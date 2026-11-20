@@ -333,8 +333,8 @@ class ShrineMap {
 
         let stepCost = dirs[d][2];
 
-        // 避光代价：如果某格在男主手电光束扇形范围内且无掩体遮挡，大幅增加代价促使 AI 绕后/走阴影
-        if (avoidBeam) {
+        // 避光代价：使用有限值安全角度差（绝不使用 while 循环，彻底杜绝 NaN 死循环冻结浏览器！）
+        if (avoidBeam && Number.isFinite(avoidBeam.angle)) {
           const wx = (nc + 0.5) * this.cellSize;
           const wy = (nr + 0.5) * this.cellSize;
           const bdx = wx - avoidBeam.x;
@@ -343,9 +343,7 @@ class ShrineMap {
           const rangePad = avoidBeam.range + 45;
           if (bDistSq < rangePad * rangePad) {
             const ang = Math.atan2(bdy, bdx);
-            let diff = ang - avoidBeam.angle;
-            while (diff > Math.PI) diff -= Math.PI * 2;
-            while (diff < -Math.PI) diff += Math.PI * 2;
+            const diff = Math.atan2(Math.sin(ang - avoidBeam.angle), Math.cos(ang - avoidBeam.angle));
             if (Math.abs(diff) < avoidBeam.halfFov + 0.24) {
               stepCost += 5.5;
             }
@@ -354,9 +352,12 @@ class ShrineMap {
 
         const tentativeG = gScore[cur] + stepCost;
         if (tentativeG < gScore[nIdx]) {
-          cameFrom[nIdx] = cur;
-          gScore[nIdx] = tentativeG;
-          pushHeap(nIdx, tentativeG + hEst(nc, nr));
+          // 额外防止起点被反向写入 cameFrom 形成环
+          if (nIdx !== startIdx) {
+            cameFrom[nIdx] = cur;
+            gScore[nIdx] = tentativeG;
+            pushHeap(nIdx, tentativeG + hEst(nc, nr));
+          }
         }
       }
     }
@@ -364,7 +365,10 @@ class ShrineMap {
     const endIdx = found ? goalIdx : bestClosestIdx;
     const rawPts = [];
     let trace = endIdx;
-    while (trace !== -1 && trace !== startIdx) {
+    let traceGuard = 0;
+    const maxTraceSteps = this.gridCols * this.gridRows;
+    while (trace !== -1 && trace !== startIdx && traceGuard < maxTraceSteps) {
+      traceGuard++;
       const tc = trace % cols;
       const tr = (trace / cols) | 0;
       rawPts.push({
@@ -372,6 +376,10 @@ class ShrineMap {
         y: (tr + 0.5) * this.cellSize
       });
       trace = cameFrom[trace];
+    }
+    if (trace !== startIdx) {
+      // 若出现环路或越界异常，丢弃残缺路径直接返回终点
+      return [{ x: tx, y: ty }];
     }
     rawPts.reverse();
 

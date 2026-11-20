@@ -133,9 +133,8 @@ class LightingSystem {
         [o.x, o.y + o.h]
       ];
       for (let k = 0; k < 4; k++) {
-        let rel = Math.atan2(corners[k][1] - oy, corners[k][0] - ox) - dirAngle;
-        while (rel > Math.PI) rel -= Math.PI * 2;
-        while (rel < -Math.PI) rel += Math.PI * 2;
+        const rawDiff = Math.atan2(corners[k][1] - oy, corners[k][0] - ox) - dirAngle;
+        const rel = Math.atan2(Math.sin(rawDiff), Math.cos(rawDiff));
         if (rel >= -halfFov && rel <= halfFov) {
           relAngles.push(rel);
           if (rel - eps >= -halfFov) relAngles.push(rel - eps);
@@ -176,9 +175,7 @@ class LightingSystem {
     if (dist > range) return { lit: false, dist, angleDiff: Math.PI };
 
     const angleToTarget = Math.atan2(dy, dx);
-    let diff = angleToTarget - dirAngle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
+    const diff = Math.atan2(Math.sin(angleToTarget - dirAngle), Math.cos(angleToTarget - dirAngle));
 
     if (Math.abs(diff) > halfFov) {
       return { lit: false, dist, angleDiff: Math.abs(diff) };
@@ -257,9 +254,9 @@ class LightingSystem {
     // 2. 手电筒光束挖空（严格受障碍物顶点射线遮挡）
     let beamPoly = null;
     const effectiveOn = player.lightOn && player.battery > 0.1;
-    if (effectiveOn || flashBurstTimer > 0) {
+    if ((effectiveOn || flashBurstTimer > 0) && effectiveBaseRange > 16) {
       const isBurst = flashBurstTimer > 0;
-      const range = isBurst ? effectiveBaseRange * 1.42 : effectiveBaseRange;
+      const range = Math.max(20, isBurst ? effectiveBaseRange * 1.42 : effectiveBaseRange);
       const halfFov = isBurst ? player.lightHalfFov * 1.45 : player.lightHalfFov;
       const intensity = isBurst ? 1.0 : flickerFactor;
 
@@ -273,21 +270,23 @@ class LightingSystem {
         map
       );
 
-      mctx.save();
-      mctx.beginPath();
-      mctx.moveTo(beamPoly[0].x, beamPoly[0].y);
-      for (let i = 1; i < beamPoly.length; i++) {
-        mctx.lineTo(beamPoly[i].x, beamPoly[i].y);
-      }
-      mctx.closePath();
+      if (beamPoly && beamPoly.length >= 3) {
+        mctx.save();
+        mctx.beginPath();
+        mctx.moveTo(beamPoly[0].x, beamPoly[0].y);
+        for (let i = 1; i < beamPoly.length; i++) {
+          mctx.lineTo(beamPoly[i].x, beamPoly[i].y);
+        }
+        mctx.closePath();
 
-      const beamGrad = mctx.createRadialGradient(originX, originY, 8, originX, originY, range);
-      beamGrad.addColorStop(0, `rgba(0, 0, 0, ${0.98 * intensity})`);
-      beamGrad.addColorStop(0.68, `rgba(0, 0, 0, ${0.86 * intensity})`);
-      beamGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
-      mctx.fillStyle = beamGrad;
-      mctx.fill();
-      mctx.restore();
+        const beamGrad = mctx.createRadialGradient(originX, originY, 8, originX, originY, range);
+        beamGrad.addColorStop(0, `rgba(0, 0, 0, ${0.98 * intensity})`);
+        beamGrad.addColorStop(0.68, `rgba(0, 0, 0, ${0.86 * intensity})`);
+        beamGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+        mctx.fillStyle = beamGrad;
+        mctx.fill();
+        mctx.restore();
+      }
     }
 
     // 3. 神社石灯笼微弱暖光（仅在玩家范围迷雾可见距离内微弱透出）
@@ -335,6 +334,8 @@ class LightingSystem {
     // 6. 雫音突袭或被照亮时自身微弱光环（且需与玩家无障碍遮挡，防止穿墙透视雫音！）
     if (
       shizune &&
+      Number.isFinite(shizune.x) &&
+      Number.isFinite(shizune.y) &&
       (shizune.state === "ambush" || shizune.state === "stunned" || shizune.litExposure > 0.1) &&
       map.hasLineOfSight(player.x, player.y, shizune.x, shizune.y, null)
     ) {
@@ -422,16 +423,17 @@ class LightingSystem {
       ctx.restore();
     }
 
-    // 2. 围绕玩家的环形范围迷雾（外围始终笼罩流动的冷灰蓝夜雾，随时间/步入妖雾加深收紧）
+    // 2. 围绕玩家的环形范围迷雾（参数严格做非零保护，避免极端窗口尺寸下 createRadialGradient 报错）
     const px = player.x - camX;
     const py = player.y - camY;
     const hour = dawnProgress * 6;
-    const baseClearRadius = Math.max(210, 390 - hour * 18 - inFogFactor * 125);
-    const outerRadius = Math.max(viewW, viewH) * 0.78;
+    const baseClearRadius = Math.max(120, 390 - hour * 18 - inFogFactor * 125);
+    const innerR = Math.max(10, baseClearRadius * 0.55);
+    const outerRadius = Math.max(innerR + 60, Math.max(viewW, viewH) * 0.78);
     const fogOpacity = Math.min(0.86, 0.44 + hour * 0.045 + inFogFactor * 0.28);
 
     ctx.save();
-    const ringGrad = ctx.createRadialGradient(px, py, baseClearRadius * 0.55, px, py, outerRadius);
+    const ringGrad = ctx.createRadialGradient(px, py, innerR, px, py, outerRadius);
     ringGrad.addColorStop(0, "rgba(18, 26, 46, 0)");
     ringGrad.addColorStop(0.42, `rgba(22, 32, 56, ${(fogOpacity * 0.36).toFixed(3)})`);
     ringGrad.addColorStop(0.75, `rgba(14, 21, 38, ${(fogOpacity * 0.78).toFixed(3)})`);

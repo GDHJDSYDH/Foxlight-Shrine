@@ -437,6 +437,7 @@
       const dt = Math.min(0.05, Math.max(0.001, rawDt));
       this.totalTimeSec += dt;
 
+      // 移动端/低配设备不显示桌面端 hover 动画，同时为脚本加载增加版本号防旧缓存干扰
       try {
         if (this.mode === "playing") {
           this._updatePlaying(dt, ts);
@@ -446,7 +447,7 @@
           this._render();
         }
       } catch (err) {
-        // 捕获单帧异常防止游戏直接死机/闪退
+        // 捕获单帧异常防止游戏直接死机/闪退，并打印诊断提示便于定位
         console.error("[Foxlight] Frame error recovered:", err);
       }
 
@@ -509,11 +510,15 @@
         this.player.aimAngle,
         move
       );
-      // 平滑旋转手电筒（防止抖动同时保持跟手）
-      let angleDiff = targetAim - this.player.aimAngle;
-      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-      this.player.aimAngle += angleDiff * Math.min(1, dt * 18);
+      // 平滑旋转手电筒（使用无 while 的安全角度归一化，杜绝 NaN/Infinity 死循环）
+      if (Number.isFinite(targetAim)) {
+        const angleDiff = Math.atan2(
+          Math.sin(targetAim - this.player.aimAngle),
+          Math.cos(targetAim - this.player.aimAngle)
+        );
+        this.player.aimAngle += angleDiff * Math.min(1, dt * 18);
+        this.player.aimAngle = Math.atan2(Math.sin(this.player.aimAngle), Math.cos(this.player.aimAngle));
+      }
 
       // 4:00后结界雾气微缩手电筒最大射程
       this.player.lightRange = hour >= 4 ? 315 : 345;
