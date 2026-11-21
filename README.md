@@ -1,5 +1,7 @@
 # 狐影零时 | Foxlight: 00:00 - 06:00
 
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
 一款支持 **PC 电脑与手机浏览器** 的 2D 俯视角手电筒潜行生存网页小游戏，部署于 GitHub Pages，即开即玩。
 
 👉 **在线游玩（GitHub Pages）**：https://gdhjdsydh.github.io/foxlight-shrine/
@@ -42,3 +44,15 @@ npx serve .
 # 或
 python -m http.server 8080
 ```
+
+---
+
+## 📜 开源与创作许可（License）
+
+本作品（《狐影零时 | Foxlight: 00:00 - 06:00》及其代码、角色立绘、场景美术与音频素材）采用 **[知识共享 署名-非商业性使用-相同方式共享 4.0 国际许可协议（CC BY-NC-SA 4.0）](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)** 进行许可。
+
+- **署名（BY）**：您必须给出适当的署名，提供指向本许可协议的链接，同时标明是否（对原始作品）作了修改。
+- **非商业性使用（NC）**：您不得将本作品用于商业目的。
+- **相同方式共享（SA）**：如果您再混合、转换或者基于本作品进行创作，您必须基于与原先许可协议相同的许可协议分发您贡献的作品。
+
+完整法律条款请见仓库根目录的 [LICENSE](./LICENSE) 文件。

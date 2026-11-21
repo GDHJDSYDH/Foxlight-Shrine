@@ -934,6 +934,25 @@ html, body {
   color: var(--ink-muted);
 }
 
+.license-footer {
+  margin-top: 12px;
+  font-size: 11px;
+  color: rgba(186, 198, 226, 0.72);
+  text-align: center;
+}
+
+.license-footer a {
+  color: var(--gold-accent);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(246, 196, 83, 0.55);
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+
+.license-footer a:hover {
+  color: #fff2c2;
+  border-bottom-color: #fff2c2;
+}
+
 /* 弹窗卡片 */
 .modal-card {
   position: relative;
