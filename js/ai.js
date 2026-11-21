@@ -193,8 +193,8 @@ class ShizuneAI {
     if (playerInLitLamp) {
       this.safeZoneCampTime += dt;
     } else {
-      // 离开安全区后较快衰减（约 6 秒归零，防止进出边缘反复卡秒刷机制）
-      this.safeZoneCampTime = Math.max(0, this.safeZoneCampTime - dt * 5.0);
+      // 离开安全区后缓慢衰减（每秒减 1.5s），防止玩家靠离开一两步再回来反复刷掉计时！
+      this.safeZoneCampTime = Math.max(0, this.safeZoneCampTime - dt * 1.5);
     }
     const campSiegeActive = playerInLitLamp && this.safeZoneCampTime >= 30.0;
 
@@ -371,22 +371,23 @@ class ShizuneAI {
         const tx = Math.max(this.map.minX + 44, Math.min(this.map.maxX - 44, playerLitLamp.x + Math.cos(orbitAng) * desiredR));
         const ty = Math.max(this.map.minY + 44, Math.min(this.map.maxY - 44, playerLitLamp.y + Math.sin(orbitAng) * desiredR));
 
-        if (curDistToLamp > 370) {
-          this._navigateTo(tx, ty, baseSpeed * 1.28, dt, avoidBeam, 0.25);
+        if (curDistToLamp > 340) {
+          // 离安全区太远时快速冲向射程，且先不避手电以免绕大圈迟迟不开火
+          this._navigateTo(tx, ty, baseSpeed * 1.45, dt, null, 0.25);
         } else {
-          this._navigateTo(tx, ty, baseSpeed * 0.96, dt, avoidBeam, 0.3);
+          this._navigateTo(tx, ty, baseSpeed * 0.98, dt, avoidBeam, 0.3);
         }
         this.facingAngle = Math.atan2(player.y - this.y, player.x - this.x);
 
-        // 在射程（< 440px）内，每 2.1 秒频繁发射一波蓝色狐火（偶发直瞄灯、奇发瞄准玩家，逼玩家走位或直接打灭行灯！）
-        if (curDistToLamp < 440 && this.siegeFireCooldown <= 0 && gameState.spawnBlueFireVolley) {
-          const aimLamp = this.siegeShotIndex % 2 === 1;
+        // 放宽远程射程至 620px：每 1.8 秒频繁发射一波蓝色狐火（偶发直瞄灯、奇发瞄准玩家，逼玩家走位或直接打灭行灯！）
+        if (curDistToLamp < 620 && this.siegeFireCooldown <= 0 && gameState.spawnBlueFireVolley) {
+          const aimLamp = this.siegeShotIndex % 2 === 0; // 第一波就优先有一发精准直奔行灯！
           this.siegeShotIndex += 1;
           const aimX = aimLamp ? playerLitLamp.x : player.x;
           const aimY = aimLamp ? playerLitLamp.y : player.y;
           const count = hour >= 3 ? 4 : 3;
-          gameState.spawnBlueFireVolley(this.x, this.y, aimX, aimY, count);
-          this.siegeFireCooldown = Math.max(1.55, 2.35 - hour * 0.1);
+          gameState.spawnBlueFireVolley(this.x, this.y, aimX, aimY, count, true);
+          this.siegeFireCooldown = Math.max(1.35, 1.95 - hour * 0.1);
         }
       }
     } else if (this.state === "stalk") {

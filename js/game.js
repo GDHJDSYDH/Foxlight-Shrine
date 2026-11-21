@@ -551,10 +551,10 @@
       return seeds;
     }
 
-    _spawnBlueFireVolley(sx, sy, tx, ty, count = 3) {
+    _spawnBlueFireVolley(sx, sy, tx, ty, count = 3, isSiege = false) {
       const baseAngle = Math.atan2(ty - sy, tx - sx);
-      const spread = 0.28; // 扇形弹幕间距
-      const speed = 255;
+      const spread = isSiege ? 0.22 : 0.28; // 远程炮击弹道更集中精准
+      const speed = isSiege ? 285 : 255;
       const half = (count - 1) * 0.5;
       for (let i = 0; i < count; i++) {
         const a = baseAngle + (i - half) * spread;
@@ -566,7 +566,7 @@
           radius: 10,
           age: 0,
           phaseThroughSec: 1.0, // 发射后第 1 秒可穿透障碍物！
-          life: 2.8,
+          life: isSiege ? 3.2 : 2.8,
           phase: i * 1.1
         });
       }
@@ -895,11 +895,17 @@
           continue;
         }
 
-        // 命中点亮的复古行灯：直接熄灭并封锁 20 秒不可点亮！
+        // 命中点亮的复古行灯：直接熄灭并封锁 20 秒不可点亮（增加线段距离检测，绝不因帧率高速穿透漏判！）
         let hitLamp = null;
         for (const lamp of this.map.vintageLamps) {
           if (!lamp.lit) continue;
-          if (Math.hypot(fb.x - lamp.x, fb.y - lamp.y) < 22 + fb.radius) {
+          const segDx = fb.x - prevX;
+          const segDy = fb.y - prevY;
+          const segLenSq = segDx * segDx + segDy * segDy;
+          const tProj = segLenSq > 1e-6 ? Math.max(0, Math.min(1, ((lamp.x - prevX) * segDx + (lamp.y - prevY) * segDy) / segLenSq)) : 0;
+          const nearX = prevX + segDx * tProj;
+          const nearY = prevY + segDy * tProj;
+          if (Math.hypot(nearX - lamp.x, nearY - lamp.y) < 26 + fb.radius) {
             hitLamp = lamp;
             break;
           }
@@ -985,8 +991,8 @@
         addDecoyFire: (x, y) => {
           this.decoyFires.push({ x, y, life: 4.5, phase: 0 });
         },
-        spawnBlueFireVolley: (sx, sy, tx, ty, count) => {
-          this._spawnBlueFireVolley(sx, sy, tx, ty, count);
+        spawnBlueFireVolley: (sx, sy, tx, ty, count, isSiege) => {
+          this._spawnBlueFireVolley(sx, sy, tx, ty, count, isSiege);
         }
       });
 
@@ -1038,8 +1044,17 @@
         this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 浓雾受阻" : "手电: 关闭(浓雾)";
         this.ui.hudLightStatus.classList.add("off");
       } else if (inLitLamp) {
-        this.ui.hudLightStatus.textContent = effectiveLightOn ? "行灯庇护 · 开灯" : "行灯庇护 · 省电";
-        this.ui.hudLightStatus.classList.remove("off");
+        const campSec = Math.floor(this.shizune.safeZoneCampTime || 0);
+        if (campSec >= 30) {
+          this.ui.hudLightStatus.textContent = "行灯受袭！狐火逼近";
+          this.ui.hudLightStatus.classList.add("off");
+        } else if (campSec >= 20) {
+          this.ui.hudLightStatus.textContent = `行灯庇护 (${30 - campSec}s)`;
+          this.ui.hudLightStatus.classList.add("off");
+        } else {
+          this.ui.hudLightStatus.textContent = effectiveLightOn ? "行灯庇护 · 开灯" : "行灯庇护 · 省电";
+          this.ui.hudLightStatus.classList.remove("off");
+        }
       } else {
         this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 开启" : "手电: 关闭";
         this.ui.hudLightStatus.classList.toggle("off", !effectiveLightOn);
