@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>狐影零时 | Foxlight: 00:00 - 06:00</title>
   <meta name="description" content="《狐影零时 | Foxlight: 00:00 - 06:00》——午夜神社手电筒潜行生存小游戏，支持电脑与手机游玩。" />
-  <link rel="stylesheet" href="css/style.css?v=5" />
+  <link rel="stylesheet" href="css/style.css?v=6" />
 </head>
 <body>
   <div id="app">
@@ -91,6 +91,13 @@
             <span class="skill-key">右键 / F</span>
           </div>
         </div>
+        <div class="skill-card compact info-only" id="pcLampSkill">
+          <img src="assets/lantern_lit_icon.svg" alt="复古行灯" class="skill-img mini-icon" />
+          <div class="skill-meta">
+            <span class="skill-name">复古行灯</span>
+            <span class="skill-key" id="hudLampStatus">靠近按住 E 点亮</span>
+          </div>
+        </div>
         <div class="skill-card compact info-only">
           <div class="skill-emoji">🔋</div>
           <div class="skill-meta">
@@ -114,6 +121,10 @@
       <!-- 右侧手电方向摇杆 + 按钮区 -->
       <div class="right-control-cluster">
         <div class="mobile-action-row">
+          <button id="mobInteractBtn" class="mob-btn lamp-btn hidden" type="button">
+            <img src="assets/lantern_lit_icon.svg" alt="点灯" />
+            <small>按住点灯</small>
+          </button>
           <button id="mobToggleBtn" class="mob-btn secondary" type="button">
             <span>🔦</span>
             <small id="mobToggleLabel">关灯</small>
@@ -155,11 +166,12 @@
         <div class="start-actions">
           <button id="btnStartGame" class="btn-primary-glow">开始守夜 · START</button>
           <button id="btnShowGuide" class="btn-secondary-glass">玩法说明</button>
+          <button id="btnShowBlackbox" class="btn-secondary-glass crash-pill hidden">查看上次异常日志</button>
         </div>
 
         <div class="quick-controls-hint">
-          <span>💻 电脑：WASD/方向键移动 · 鼠标瞄准 · 左键/空格爆闪 · 右键/F开关灯</span>
-          <span>📱 手机：左摇杆移动 · 右摇杆照手电 · 右侧按钮爆闪/关灯</span>
+          <span>💻 电脑：WASD移动 · 鼠标瞄准 · 左键/空格爆闪 · 右键/F开关灯 · 长按E点亮复古灯</span>
+          <span>📱 手机：左摇杆移动 · 右摇杆照手电 · 右侧按钮爆闪/关灯/靠近灯长按点灯</span>
         </div>
       </div>
     </div>
@@ -170,20 +182,20 @@
         <h2>守夜指南 · HOW TO SURVIVE</h2>
         <div class="guide-grid">
           <div class="guide-item">
-            <h3>🔦 手电与驱散</h3>
-            <p>持续用手电光照亮雫音约 0.6 秒，即可让她畏光撤离；手电光会被障碍物严格阻挡，但照亮她藏身的灌木/屏风也能提前把她逼出来！</p>
+            <h3>🔦 手电、蓝火与爆闪</h3>
+            <p>普通手电驱散雫音时，她可能会甩出<strong>蓝色狐火弹幕</strong>反击（命中扣 14% 电量，可借掩体挡住）；用<strong>强光爆闪</strong>击晕她则不会发射！</p>
           </div>
           <div class="guide-item">
-            <h3>⚡ 强光爆闪反制</h3>
-            <p>消耗 20% 电量释放强光爆闪，可瞬间打断雫音的近身扑击并令其眩晕 2.5 秒。危急时刻务必果断使用！</p>
+            <h3>🏮 复古行灯与水洼陷阱</h3>
+            <p>靠近熄灭的复古行灯长按 <strong>E / 手机点灯钮</strong> 1.5秒点亮，范围内大幅降低雫音攻击欲望（但她会趁你远离偷灭灯）！踩入庭院水洼会明显减速。</p>
           </div>
           <div class="guide-item">
             <h3>🌫️ 范围迷雾与电池</h3>
-            <p>庭院外围与漂浮的神社妖雾会压缩手电视野，请及时拾取发光电池（+35%电量）。关灯太久会让雫音更加敏锐。</p>
+            <p>庭院外围与漂浮的神社妖雾会压缩手电视野，请及时拾取发光电池（+35%电量）。关灯或没电会让雫音立刻进入高攻击性狂猎！</p>
           </div>
           <div class="guide-item">
             <h3>🔔 听铃音辨埋伏</h3>
-            <p>雫音会借掩体绕后潜伏并露出晃动的红白狐尾与清脆铃声；02:00 后她还会释放“假狐火”诱你转身！</p>
+            <p>雫音会钻入灌木隐匿，只露出晃动的红白狐尾与叶缝金瞳；02:00 后她还会释放“假狐火”诱你转身！</p>
           </div>
         </div>
         <button id="btnCloseGuide" class="btn-primary-glow">明白了，返回</button>
@@ -218,14 +230,28 @@
         </div>
       </div>
     </div>
+    <!-- 崩溃/黑匣子错误诊断弹窗（发生异常不直接退出网页，完整保留现场报告） -->
+    <div id="crashModal" class="overlay-screen hidden" style="z-index: 90">
+      <div class="modal-card crash-card">
+        <h2 id="crashModalTitle">⚠️ 捕获到运行异常（已安全拦截）</h2>
+        <p class="crash-sub">游戏已暂停保护现场而未退出网页，你可以复制以下诊断信息发送给开发者排查：</p>
+        <pre id="crashReportBox" class="crash-report-box"></pre>
+        <div class="end-actions">
+          <button id="btnCopyCrash" class="btn-primary-glow">一键复制错误报告</button>
+          <button id="btnCrashResume" class="btn-secondary-glass">尝试继续</button>
+          <button id="btnCrashClose" class="btn-secondary-glass">关闭 / 返回</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 核心脚本模块 -->
-  <script src="js/audio.js?v=5"></script>
-  <script src="js/map.js?v=5"></script>
-  <script src="js/lighting.js?v=5"></script>
-  <script src="js/ai.js?v=5"></script>
-  <script src="js/input.js?v=5"></script>
-  <script src="js/game.js?v=5"></script>
+  <script src="js/crashguard.js?v=6"></script>
+  <script src="js/audio.js?v=6"></script>
+  <script src="js/map.js?v=6"></script>
+  <script src="js/lighting.js?v=6"></script>
+  <script src="js/ai.js?v=6"></script>
+  <script src="js/input.js?v=6"></script>
+  <script src="js/game.js?v=6"></script>
 </body>
 </html>

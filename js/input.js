@@ -19,6 +19,7 @@ class InputController {
 
     this.moveStick = { active: false, pointerId: null, dx: 0, dy: 0, maxR: 42 };
     this.aimStick = { active: false, pointerId: null, dx: 0, dy: 0, maxR: 42, angle: null };
+    this.mobileInteractHeld = false;
 
     this._bindKeyboard();
     this._bindMouse();
@@ -86,6 +87,7 @@ class InputController {
     const aimKnob = document.getElementById("aimStickKnob");
     const mobFlashBtn = document.getElementById("mobFlashBtn");
     const mobToggleBtn = document.getElementById("mobToggleBtn");
+    const mobInteractBtn = document.getElementById("mobInteractBtn");
 
     const setupStick = (zone, knob, stickObj, isAim) => {
       if (!zone || !knob) return;
@@ -161,9 +163,29 @@ class InputController {
         if (this.callbacks.onToggleLight) this.callbacks.onToggleLight();
       });
     }
+
+    if (mobInteractBtn) {
+      const startHold = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.mobileInteractHeld = true;
+        mobInteractBtn.classList.add("holding");
+      };
+      const endHold = () => {
+        this.mobileInteractHeld = false;
+        mobInteractBtn.classList.remove("holding");
+      };
+      mobInteractBtn.addEventListener("pointerdown", startHold);
+      mobInteractBtn.addEventListener("pointerup", endHold);
+      mobInteractBtn.addEventListener("pointercancel", endHold);
+      mobInteractBtn.addEventListener("pointerleave", endHold);
+    }
   }
 
   _resetSticks() {
+    this.mobileInteractHeld = false;
+    const mi = document.getElementById("mobInteractBtn");
+    if (mi) mi.classList.remove("holding");
     this.moveStick.active = false;
     this.moveStick.dx = 0;
     this.moveStick.dy = 0;
@@ -174,6 +196,11 @@ class InputController {
     const ak = document.getElementById("aimStickKnob");
     if (mk) mk.style.transform = "translate(0px, 0px)";
     if (ak) ak.style.transform = "translate(0px, 0px)";
+  }
+
+  // 是否正在按住交互键（电脑端长按 E / 手机端长按点灯按钮）
+  isInteractHeld() {
+    return this.keys.has("KeyE") || this.mobileInteractHeld;
   }
 
   // 获取归一化移动向量 { x, y }

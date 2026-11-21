@@ -12,6 +12,8 @@ class ShrineMap {
     // blocksLight: 是否阻挡手电筒光线产生阴影
     this.obstacles = [];
     this.batterySpawns = [];
+    this.puddles = [];
+    this.vintageLamps = [];
     this.buildLayout();
 
     // 网格寻路参数（40px 栅格，兼顾绕障精度与 60fps 极速性能）
@@ -104,6 +106,24 @@ class ShrineMap {
       { x: 1060, y: 855 }
     ];
 
+    // 庭院积水洼陷阱（踩入显著降低玩家移速至 58%，并溅起月光水花涟漪）
+    this.puddles = [
+      { id: "puddle_1", x: 900, y: 420, rx: 68, ry: 44, rot: 0.15 },
+      { id: "puddle_2", x: 900, y: 895, rx: 72, ry: 46, rot: -0.12 },
+      { id: "puddle_3", x: 505, y: 655, rx: 58, ry: 74, rot: 0.22 },
+      { id: "puddle_4", x: 1295, y: 655, rx: 58, ry: 74, rot: -0.18 },
+      { id: "puddle_5", x: 430, y: 215, rx: 62, ry: 42, rot: -0.25 },
+      { id: "puddle_6", x: 1370, y: 1100, rx: 66, ry: 44, rot: 0.2 }
+    ];
+
+    // 4 盏可交互复古神社行灯（按住 E / 手机按钮 1.5s 点亮，降低范围内雫音攻击欲望；雫音可悄悄熄灭）
+    this.vintageLamps = [
+      { id: "lamp_nw", name: "西北行灯", x: 470, y: 455, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
+      { id: "lamp_ne", name: "东北行灯", x: 1330, y: 455, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
+      { id: "lamp_sw", name: "西南行灯", x: 470, y: 865, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
+      { id: "lamp_se", name: "东南行灯", x: 1330, y: 865, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 }
+    ];
+
     for (const o of this.obstacles) {
       o.cx = o.x + o.w * 0.5;
       o.cy = o.y + o.h * 0.5;
@@ -129,7 +149,7 @@ class ShrineMap {
           wy > this.maxY - pad;
 
         if (!blocked) {
-          for (const o of this.obstacles) {
+    for (const o of this.obstacles) {
             if (wx >= o.x - pad && wx <= o.x + o.w + pad && wy >= o.y - pad && wy <= o.y + o.h + pad) {
               blocked = true;
               break;
@@ -422,6 +442,265 @@ class ShrineMap {
     return rawPts;
   }
 
+  // 重置互动复古行灯状态（开局默认随机点亮 1 盏便于引导玩家了解机制）
+  resetInteractables() {
+    const startIdx = Math.floor(Math.random() * this.vintageLamps.length);
+    for (let i = 0; i < this.vintageLamps.length; i++) {
+      const lamp = this.vintageLamps[i];
+      lamp.lit = i === startIdx;
+      lamp.progress = lamp.lit ? 1 : 0;
+      lamp.extinguishCooldown = 0;
+    }
+  }
+
+  // 检测坐标是否踩在任一积水洼中
+  isPointInPuddle(x, y) {
+    for (const p of this.puddles) {
+      const dx = x - p.x;
+      const dy = y - p.y;
+      const cos = Math.cos(-p.rot);
+      const sin = Math.sin(-p.rot);
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      if ((lx * lx) / (p.rx * p.rx) + (ly * ly) / (p.ry * p.ry) <= 1) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // 检测坐标是否位于某盏点亮的复古灯保护范围内
+  getLitLampCovering(x, y) {
+    for (const lamp of this.vintageLamps) {
+      if (!lamp.lit) continue;
+      if (Math.hypot(x - lamp.x, y - lamp.y) <= lamp.radius) {
+        return lamp;
+      }
+    }
+    return null;
+  }
+
+  // 查找玩家身边可交互（熄灭状态）的复古灯
+  getInteractableLampNear(x, y, maxDist = 78) {
+    let best = null;
+    let bestD = maxDist;
+    for (const lamp of this.vintageLamps) {
+      if (lamp.lit) continue;
+      const d = Math.hypot(x - lamp.x, y - lamp.y);
+      if (d < bestD) {
+        bestD = d;
+        best = lamp;
+      }
+    }
+    return best;
+  }
+
+  // 绘制地面浅水洼（位于地面之上、角色之下）
+  drawPuddles(ctx, timeSec, camX = 0, camY = 0, viewW = 9999, viewH = 9999) {
+    for (const p of this.puddles) {
+      if (p.x + p.rx < camX - 40 || p.x - p.rx > camX + viewW + 40 || p.y + p.ry < camY - 40 || p.y - p.ry > camY + viewH + 40) {
+        continue;
+      }
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+
+      // 深蓝水洼主体
+      const grad = ctx.createRadialGradient(-p.rx * 0.2, -p.ry * 0.2, 6, 0, 0, Math.max(p.rx, p.ry));
+      grad.addColorStop(0, "rgba(74, 128, 178, 0.56)");
+      grad.addColorStop(0.65, "rgba(32, 64, 108, 0.52)");
+      grad.addColorStop(1, "rgba(18, 32, 58, 0.14)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.rx, p.ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 月光水缘反光与轻微涟漪
+      ctx.strokeStyle = "rgba(148, 208, 255, 0.34)";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.rx - 2, p.ry - 2, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      const wave = (timeSec * 0.65 + p.x * 0.01) % 1;
+      ctx.strokeStyle = `rgba(175, 224, 255, ${(0.28 * (1 - wave)).toFixed(3)})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, p.rx * (0.25 + wave * 0.62), p.ry * (0.25 + wave * 0.62), 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+  }
+
+  // 绘制 4 盏可交互复古神社行灯
+  drawVintageLamps(ctx, timeSec, nearLampId, isMobile, camX = 0, camY = 0, viewW = 9999, viewH = 9999) {
+    for (const lamp of this.vintageLamps) {
+      if (lamp.x < camX - 240 || lamp.x > camX + viewW + 240 || lamp.y < camY - 240 || lamp.y > camY + viewH + 240) {
+        continue;
+      }
+      ctx.save();
+      ctx.translate(lamp.x, lamp.y);
+
+      // 点亮态：绘制温暖安全区结界光圈
+      if (lamp.lit) {
+        const flicker = 0.88 + Math.sin(timeSec * 6.5 + lamp.x) * 0.12;
+        const zoneGrad = ctx.createRadialGradient(0, 0, 14, 0, 0, lamp.radius);
+        zoneGrad.addColorStop(0, `rgba(255, 214, 126, ${(0.34 * flicker).toFixed(3)})`);
+        zoneGrad.addColorStop(0.65, `rgba(255, 162, 68, ${(0.12 * flicker).toFixed(3)})`);
+        zoneGrad.addColorStop(1, "rgba(255, 140, 48, 0)");
+        ctx.fillStyle = zoneGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, lamp.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 柔和结界虚线环
+        ctx.strokeStyle = `rgba(255, 210, 120, ${(0.28 * flicker).toFixed(3)})`;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([7, 7]);
+        ctx.beginPath();
+        ctx.arc(0, 0, lamp.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // 木质底座阴影
+      ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+      this._fillRoundRect(ctx, -16, -14, 34, 34, 6);
+
+      // 复古木框和纸行灯主体
+      ctx.fillStyle = "#3b221a";
+      this._fillRoundRect(ctx, -17, -17, 34, 34, 6);
+      ctx.strokeStyle = lamp.lit ? "#e8a84a" : "#6c5046";
+      ctx.lineWidth = 2.2;
+      ctx.strokeRect(-15, -15, 30, 30);
+
+      // 内部和纸灯芯
+      if (lamp.lit) {
+        const coreGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, 14);
+        coreGrad.addColorStop(0, "#fffbe0");
+        coreGrad.addColorStop(0.6, "#ffbe52");
+        coreGrad.addColorStop(1, "#c76822");
+        ctx.fillStyle = coreGrad;
+      } else {
+        ctx.fillStyle = "#242836";
+      }
+      ctx.fillRect(-10, -10, 20, 20);
+
+      // 木格棂条纹
+      ctx.strokeStyle = "#3b221a";
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 10);
+      ctx.moveTo(-10, 0);
+      ctx.lineTo(10, 0);
+      ctx.stroke();
+
+      // 正在充能点燃时的环形进度条
+      if (!lamp.lit && lamp.progress > 0.01) {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 26, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = "#ffd166";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(0, 0, 26, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, lamp.progress));
+        ctx.stroke();
+      }
+
+      // 玩家靠近熄灭灯时显示按键提示气泡
+      if (!lamp.lit && lamp.id === nearLampId) {
+        ctx.fillStyle = "rgba(12, 18, 34, 0.86)";
+        this._fillRoundRect(ctx, -56, -46, 112, 22, 11);
+        ctx.strokeStyle = "rgba(246, 196, 83, 0.7)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = "#ffe8a3";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(isMobile ? "按住右侧按钮点灯" : "按住 [E] 点亮行灯", 0, -35);
+      }
+
+      ctx.restore();
+    }
+  }
+
+  // 绘制障碍物面向手电筒的柔和受光面（配合真实背面投影，彻底消除截图里障碍物被盖黑成诡异立体块的观感！）
+  drawLitObstacleHighlights(ctx, player, originX, originY, effectiveRange, isBurst, timeSec, hidingObstacleId, camX, camY, viewW, viewH) {
+    const lightActive = (player.lightOn && player.battery > 0.1) || isBurst;
+    const range = isBurst ? effectiveRange * 1.42 : effectiveRange;
+    const halfFov = isBurst ? player.lightHalfFov * 1.45 : player.lightHalfFov;
+    const selfVisRadius = player.lightOn && player.battery > 0.1 ? 112 : 76;
+
+    for (const o of this.obstacles) {
+      if (o.x + o.w < camX - 60 || o.x > camX + viewW + 60 || o.y + o.h < camY - 60 || o.y > camY + viewH + 60) {
+        continue;
+      }
+
+      // 计算障碍物离出光点最近表面点，判断是否处于手电筒照射面或主角近身视野内
+      const closestX = Math.max(o.x, Math.min(originX, o.x + o.w));
+      const closestY = Math.max(o.y, Math.min(originY, o.y + o.h));
+      const dx = closestX - originX;
+      const dy = closestY - originY;
+      const dist = Math.hypot(dx, dy);
+
+      let litAlpha = 0;
+
+      // 近身自然可见度
+      if (dist < selfVisRadius && this.hasLineOfSight(player.x, player.y, closestX, closestY, o)) {
+        litAlpha = Math.max(litAlpha, (1 - dist / selfVisRadius) * 0.72);
+      }
+
+      // 手电筒正面受光判定（仅检查到该障碍物表面之间没有其它障碍挡住！）
+      if (lightActive && dist < range) {
+        const ang = Math.atan2(dy, dx);
+        const diff = Math.atan2(Math.sin(ang - player.aimAngle), Math.cos(ang - player.aimAngle));
+        // 角度略微放宽（物体有宽度），保证障碍物边缘顺滑受光
+        const angularWidth = Math.atan2(Math.max(o.w, o.h) * 0.45, Math.max(24, dist));
+        if (Math.abs(diff) <= halfFov + angularWidth && this.hasLineOfSight(originX, originY, closestX, closestY, o)) {
+          const distFade = Math.max(0, 1 - dist / range);
+          const coneFade = Math.max(0.25, 1 - Math.abs(diff) / (halfFov + angularWidth + 0.05));
+          litAlpha = Math.max(litAlpha, Math.min(0.95, distFade * coneFade * (isBurst ? 1.15 : 1.0)));
+        }
+      }
+
+      if (litAlpha <= 0.04) continue;
+
+      ctx.save();
+      ctx.globalAlpha = litAlpha;
+      let ox = o.x;
+      let oy = o.y;
+      if (o.shake > 0) {
+        ox += Math.sin(timeSec * 36) * o.shake * 3.2;
+        oy += Math.cos(timeSec * 29) * o.shake * 2.2;
+      }
+
+      if (o.type === "bush") {
+        this._drawBush(ctx, ox, oy, o.w, o.h, timeSec, o.id === hidingObstacleId ? 1 : 0);
+      } else if (o.type === "torii") {
+        this._drawToriiPillar(ctx, ox, oy, o.w, o.h);
+      } else if (o.type === "screen") {
+        this._drawShrineScreen(ctx, ox, oy, o.w, o.h);
+      } else if (o.type === "lantern") {
+        this._drawStoneLantern(ctx, ox, oy, o.w, o.h, timeSec);
+      } else if (o.type === "shrine") {
+        this._drawCentralAltar(ctx, ox, oy, o.w, o.h, timeSec);
+      }
+
+      // 面向光源边缘柔和暖色受光边
+      ctx.globalAlpha = litAlpha * 0.24;
+      ctx.strokeStyle = "#ffe8b6";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ox + 1, oy + 1, o.w - 2, o.h - 2);
+      ctx.restore();
+    }
+  }
+
   getHideableObstacles() {
     return this.obstacles.filter((o) => o.hideable);
   }
@@ -453,7 +732,7 @@ class ShrineMap {
     if (entity.y > this.maxY - r) entity.y = this.maxY - r;
 
     for (let pass = 0; pass < 3; pass++) {
-      for (const o of this.obstacles) {
+    for (const o of this.obstacles) {
         const closestX = Math.max(o.x, Math.min(entity.x, o.x + o.w));
         const closestY = Math.max(o.y, Math.min(entity.y, o.y + o.h));
         const dx = entity.x - closestX;
@@ -570,7 +849,6 @@ class ShrineMap {
     const maxVx = camX + viewW + cullMargin;
     const minVy = camY - cullMargin;
     const maxVy = camY + viewH + cullMargin;
-
     for (const o of this.obstacles) {
       if (o.x + o.w < minVx || o.x > maxVx || o.y + o.h < minVy || o.y > maxVy) continue;
       ctx.save();

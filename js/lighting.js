@@ -345,6 +345,22 @@ class LightingSystem {
         mctx.fill();
       }
 
+      // 3.5. 玩家点亮的复古神社行灯温暖安全区光源（照亮 185px 半径）
+      if (map.vintageLamps) {
+        for (const lamp of map.vintageLamps) {
+          if (!lamp.lit) continue;
+          const lrad = lamp.radius * 1.12;
+          const vlg = mctx.createRadialGradient(lamp.x, lamp.y, 12, lamp.x, lamp.y, lrad);
+          vlg.addColorStop(0, "rgba(0, 0, 0, 0.94)");
+          vlg.addColorStop(0.68, "rgba(0, 0, 0, 0.62)");
+          vlg.addColorStop(1, "rgba(0, 0, 0, 0)");
+          mctx.fillStyle = vlg;
+          mctx.beginPath();
+          mctx.arc(lamp.x, lamp.y, lrad, 0, Math.PI * 2);
+          mctx.fill();
+        }
+      }
+
       // 4. 电池发光点（穿透夜色以便玩家发现，但受远距浓雾衰减）
       for (const b of batteries) {
         const d = Math.hypot(b.x - player.x, b.y - player.y);
@@ -370,9 +386,24 @@ class LightingSystem {
         mctx.fill();
       }
 
-      // 6. 雫音突袭或被照亮时自身微弱光环（且需与玩家无障碍遮挡，防止穿墙透视雫音！）
+      // 5.5. 蓝色狐火弹幕穿透黑暗的高亮微芒
+      if (state.blueFireballs) {
+        for (const fb of state.blueFireballs) {
+          const bfg = mctx.createRadialGradient(fb.x, fb.y, 2, fb.x, fb.y, 58);
+          bfg.addColorStop(0, "rgba(0, 0, 0, 0.88)");
+          bfg.addColorStop(1, "rgba(0, 0, 0, 0)");
+          mctx.fillStyle = bfg;
+          mctx.beginPath();
+          mctx.arc(fb.x, fb.y, 58, 0, Math.PI * 2);
+          mctx.fill();
+        }
+      }
+
+      // 6. 雫音突袭或被照亮时自身微弱光环（灌木隐匿态不暴露本体光环，隔墙也不透视！）
+      const shizuneHiddenInBush = shizune && shizune.isHiddenInBush && shizune.isHiddenInBush();
       if (
         shizune &&
+        !shizuneHiddenInBush &&
         Number.isFinite(shizune.x) &&
         Number.isFinite(shizune.y) &&
         (shizune.state === "ambush" || shizune.state === "stunned" || shizune.litExposure > 0.1) &&
@@ -397,6 +428,32 @@ class LightingSystem {
       mainCtx.drawImage(this.maskCanvas, 0, 0, mainCtx.canvas.width, mainCtx.canvas.height);
     } finally {
       mainCtx.restore();
+    }
+
+    // 关键光影修复（解决截图里障碍物被盖成诡异黑块/反向立体阴影问题）：
+    // 在黑暗遮罩之上，仅重绘“面向手电筒的障碍物受光本体”，而背光面依然保留自然阴影拖尾！
+    if (map.drawLitObstacleHighlights) {
+      mainCtx.save();
+      try {
+        mainCtx.translate(-camX, -camY);
+        const hidingId = shizune && shizune.state === "hiding" && shizune.hidingObstacle ? shizune.hidingObstacle.id : null;
+        map.drawLitObstacleHighlights(
+          mainCtx,
+          player,
+          originX,
+          originY,
+          effectiveBaseRange,
+          !!isBurst,
+          timeSec,
+          hidingId,
+          camX,
+          camY,
+          viewW,
+          viewH
+        );
+      } finally {
+        mainCtx.restore();
+      }
     }
 
     // 叠加手电筒柔和暖白体积光（与精确遮挡多边形完全重合）

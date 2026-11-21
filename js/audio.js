@@ -11,6 +11,12 @@ class SoundEngine {
     this.ambientGain = null;
     this.ambientRunning = false;
     this.lastHeartbeatTime = 0;
+
+    // 低音量氛围 BGM 播放器（优先使用用户 Lyria 3.5 生成的 assets/bgm_midnight.mp3）
+    this.bgmAudio = null;
+    this.bgmBaseVolume = 0.24;
+    this.bgmTargetVolume = 0.24;
+    this.lastSplashTime = 0;
   }
 
   init() {
@@ -19,19 +25,62 @@ class SoundEngine {
         if (this.ctx.state === "suspended") {
           this.ctx.resume().catch(() => {});
         }
-        return;
+      } else {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) {
+          this.ctx = new AudioCtx();
+          this.masterGain = this.ctx.createGain();
+          this.masterGain.gain.value = this.muted ? 0 : 0.75;
+          this.masterGain.connect(this.ctx.destination);
+          this.startAmbientWind();
+        }
       }
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
-
-      this.ctx = new AudioCtx();
-      this.masterGain = this.ctx.createGain();
-      this.masterGain.gain.value = this.muted ? 0 : 0.75;
-      this.masterGain.connect(this.ctx.destination);
-      this.startAmbientWind();
+      this._initBgm();
     } catch (_e) {
       this.ctx = null;
     }
+  }
+
+  _initBgm() {
+    try {
+      if (!this.bgmAudio) {
+        const audio = new Audio("assets/bgm_midnight.mp3");
+        audio.loop = true;
+        audio.preload = "auto";
+        audio.volume = this.muted ? 0 : this.bgmBaseVolume;
+        this.bgmAudio = audio;
+      }
+      if (!this.muted && this.bgmAudio.paused) {
+        this.bgmAudio.play().catch(() => {});
+      }
+    } catch (_e) {}
+  }
+
+  startBgm() {
+    this._initBgm();
+    if (this.bgmAudio && !this.muted) {
+      this.bgmAudio.volume = this.bgmBaseVolume;
+      if (this.bgmAudio.paused) {
+        this.bgmAudio.play().catch(() => {});
+      }
+    }
+  }
+
+  setBgmPaused(paused) {
+    if (!this.bgmAudio) return;
+    try {
+      if (paused) {
+        this.bgmAudio.pause();
+      } else if (!this.muted) {
+        this.bgmAudio.play().catch(() => {});
+      }
+    } catch (_e) {}
+  }
+
+  setBgmDuck(isDucking) {
+    if (!this.bgmAudio || this.muted) return;
+    const target = isDucking ? this.bgmBaseVolume * 0.65 : this.bgmBaseVolume;
+    this.bgmAudio.volume += (target - this.bgmAudio.volume) * 0.08;
   }
 
   _canPlay() {
@@ -46,6 +95,16 @@ class SoundEngine {
       } catch (_e) {
         this.masterGain.gain.value = muted ? 0 : 0.75;
       }
+    }
+    if (this.bgmAudio) {
+      try {
+        this.bgmAudio.volume = muted ? 0 : this.bgmBaseVolume;
+        if (muted) {
+          this.bgmAudio.pause();
+        } else {
+          this.bgmAudio.play().catch(() => {});
+        }
+      } catch (_e) {}
     }
   }
 
@@ -85,7 +144,7 @@ class SoundEngine {
       lfo.start();
 
       this.ambientGain = this.ctx.createGain();
-      this.ambientGain.gain.value = 0.06;
+      this.ambientGain.gain.value = 0.032;
 
       noise.connect(filter);
       filter.connect(this.ambientGain);
@@ -361,6 +420,102 @@ class SoundEngine {
       this._autoCleanup(osc, [osc, filter, gain]);
       osc.start(now);
       osc.stop(now + 0.62);
+    } catch (_e) {}
+  }
+
+  // 踩水洼水花声（节流避免密集连响）
+  playWaterStep(nowMs) {
+    if (!this._canPlay()) return;
+    if (nowMs - this.lastSplashTime < 260) return;
+    this.lastSplashTime = nowMs;
+    try {
+      const now = this.ctx.currentTime;
+      const len = Math.floor(this.ctx.sampleRate * 0.09);
+      const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      }
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "bandpass";
+      filter.frequency.setValueAtTime(1100, now);
+      filter.frequency.exponentialRampToValueAtTime(420, now + 0.085);
+      filter.Q.value = 1.6;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.14, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain);
+      this._autoCleanup(src, [src, filter, gain]);
+      src.start(now);
+    } catch (_e) {}
+  }
+
+  // 复古灯点亮 / 被吹灭音效
+  playLampState(isLit) {
+    if (!this._canPlay()) return;
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = isLit ? "sine" : "triangle";
+      osc.frequency.setValueAtTime(isLit ? 440 : 380, now);
+      osc.frequency.linearRampToValueAtTime(isLit ? 880 : 140, now + 0.24);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.16, now + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      this._autoCleanup(osc, [osc, gain]);
+      osc.start(now);
+      osc.stop(now + 0.3);
+    } catch (_e) {}
+  }
+
+  // 蓝色狐火发射与命中削电音效
+  playBlueFireCast() {
+    if (!this._canPlay()) return;
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(520, now);
+      osc.frequency.linearRampToValueAtTime(1320, now + 0.14);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(0.14, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      this._autoCleanup(osc, [osc, gain]);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } catch (_e) {}
+  }
+
+  playBatteryShock() {
+    if (!this._canPlay()) return;
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(340, now);
+      osc.frequency.linearRampToValueAtTime(95, now + 0.22);
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = "lowpass";
+      filter.frequency.value = 900;
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain);
+      this._autoCleanup(osc, [osc, filter, gain]);
+      osc.start(now);
+      osc.stop(now + 0.27);
     } catch (_e) {}
   }
 

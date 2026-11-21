@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="52%" r="48%">
+      <stop offset="0%" stop-color="#ffd57a" stop-opacity="0.72"/>
+      <stop offset="55%" stop-color="#ff8c2e" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#0d111e" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="paperGlow" cx="50%" cy="46%" r="55%">
+      <stop offset="0%" stop-color="#fff9db"/>
+      <stop offset="55%" stop-color="#ffca64"/>
+      <stop offset="100%" stop-color="#d97524"/>
+    </radialGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#5a3324"/>
+      <stop offset="100%" stop-color="#2b1712"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#101526"/>
+  <circle cx="64" cy="66" r="56" fill="url(#bgGlow)"/>
+  <!-- Top roof cap -->
+  <path d="M26 36 L64 20 L102 36 L94 42 L34 42 Z" fill="url(#wood)" stroke="#a34935" stroke-width="2"/>
+  <circle cx="64" cy="18" r="5" fill="#e8b84b"/>
+  <!-- Glowing washi paper body -->
+  <rect x="38" y="42" width="52" height="54" rx="4" fill="url(#paperGlow)" stroke="#4c281d" stroke-width="4"/>
+  <!-- Lattice bars -->
+  <line x1="64" y1="42" x2="64" y2="96" stroke="#4c281d" stroke-width="3"/>
+  <line x1="38" y1="60" x2="90" y2="60" stroke="#4c281d" stroke-width="2.5"/>
+  <line x1="38" y1="78" x2="90" y2="78" stroke="#4c281d" stroke-width="2.5"/>
+  <!-- Flame core -->
+  <path d="M64 56 Q72 67 64 76 Q56 67 64 56 Z" fill="#fffdf0"/>
+  <!-- Base stand -->
+  <rect x="30" y="96" width="68" height="10" rx="3" fill="url(#wood)" stroke="#8a3c2d" stroke-width="2"/>
+  <rect x="36" y="106" width="10" height="8" rx="2" fill="#2b1712"/>
+  <rect x="82" y="106" width="10" height="8" rx="2" fill="#2b1712"/>
+</svg>

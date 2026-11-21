@@ -37,6 +37,7 @@
       this.canvas = document.getElementById("gameCanvas");
       this.ctx = this.canvas.getContext("2d");
 
+      this.crashGuard = typeof CrashGuard !== "undefined" ? new CrashGuard() : null;
       this.sound = new SoundEngine();
       this.map = new ShrineMap();
       this.lighting = new LightingSystem();
@@ -56,6 +57,8 @@
       this.groundPattern = null;
       this.batteryImg = new Image();
       this.batteryImg.src = "assets/battery_icon.jpg";
+      this.blueFireImg = new Image();
+      this.blueFireImg.src = "assets/blue_foxfire.jpg";
       this.groundImg = new Image();
       this.groundImg.onload = () => {
         this.groundPattern = this.ctx.createPattern(this.groundImg, "repeat");
@@ -81,6 +84,7 @@
         hudLightStatus: document.getElementById("hudLightStatus"),
         hudDawnFill: document.getElementById("hudDawnFill"),
         hudBatteryCount: document.getElementById("hudBatteryCount"),
+        hudLampStatus: document.getElementById("hudLampStatus"),
         toastBanner: document.getElementById("toastBanner"),
 
         shizuneAlert: document.getElementById("shizuneAlert"),
@@ -89,9 +93,18 @@
         pcFlashCd: document.getElementById("pcFlashCd"),
         mobFlashCd: document.getElementById("mobFlashCd"),
         mobToggleLabel: document.getElementById("mobToggleLabel"),
+        mobInteractBtn: document.getElementById("mobInteractBtn"),
 
         btnAudio: document.getElementById("btnAudio"),
         pauseStats: document.getElementById("pauseStats"),
+
+        crashModal: document.getElementById("crashModal"),
+        crashModalTitle: document.getElementById("crashModalTitle"),
+        crashReportBox: document.getElementById("crashReportBox"),
+        btnShowBlackbox: document.getElementById("btnShowBlackbox"),
+        btnCopyCrash: document.getElementById("btnCopyCrash"),
+        btnCrashResume: document.getElementById("btnCrashResume"),
+        btnCrashClose: document.getElementById("btnCrashClose"),
 
         endBgArt: document.getElementById("endBgArt"),
         endBadge: document.getElementById("endBadge"),
@@ -110,8 +123,12 @@
       this.player = this._createInitialPlayer();
       this.batteries = [];
       this.decoyFires = [];
+      this.blueFireballs = [];
       this.fogZones = [];
       this.inFogFactor = 0;
+      this.inPuddle = false;
+      this.nearLamp = null;
+      this.blueShockFlash = 0;
       this.particles = [];
       this.batteryRespawnTimer = 0;
       this.flashBurstTimer = 0;
@@ -215,6 +232,70 @@
       // PC 技能卡片点击也可触发
       document.getElementById("pcFlashSkill").addEventListener("click", () => this.triggerFlashBurst());
       document.getElementById("pcToggleSkill").addEventListener("click", () => this.toggleFlashlight());
+
+      // 崩溃诊断弹窗与黑匣子日志查看绑定
+      if (this.crashGuard) {
+        this.crashGuard.onFatalCallback = (reportText, source) => {
+          this._showCrashModal(`⚠️ 捕获到运行异常 (${source})`, reportText, true);
+        };
+        if (this.crashGuard.getPreviousCrashReport() && this.ui.btnShowBlackbox) {
+          this.ui.btnShowBlackbox.classList.remove("hidden");
+        }
+      }
+
+      if (this.ui.btnShowBlackbox) {
+        this.ui.btnShowBlackbox.addEventListener("click", () => {
+          if (!this.crashGuard) return;
+          this._showCrashModal("📦 上次异常中止黑匣子快照", this.crashGuard.formatPreviousBlackbox(), false);
+        });
+      }
+
+      if (this.ui.btnCopyCrash) {
+        this.ui.btnCopyCrash.addEventListener("click", () => {
+          const text = this.ui.crashReportBox.textContent || "";
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(() => {
+              this.ui.btnCopyCrash.textContent = "已复制！可粘贴发给开发者";
+              setTimeout(() => {
+                this.ui.btnCopyCrash.textContent = "一键复制错误报告";
+              }, 2000);
+            }).catch(() => {});
+          }
+        });
+      }
+
+      if (this.ui.btnCrashResume) {
+        this.ui.btnCrashResume.addEventListener("click", () => {
+          this.ui.crashModal.classList.add("hidden");
+          this.consecutiveErrors = 0;
+          if (this.mode === "paused") {
+            this.mode = "playing";
+            this.lastFrameTs = performance.now();
+            this.sound.setBgmPaused(false);
+          }
+        });
+      }
+
+      if (this.ui.btnCrashClose) {
+        this.ui.btnCrashClose.addEventListener("click", () => {
+          this.ui.crashModal.classList.add("hidden");
+          if (this.crashGuard) this.crashGuard.clearPreviousCrashReport();
+          if (this.ui.btnShowBlackbox) this.ui.btnShowBlackbox.classList.add("hidden");
+        });
+      }
+    }
+
+    _showCrashModal(title, reportText, pauseGameplay) {
+      if (pauseGameplay && this.mode === "playing") {
+        this.mode = "paused";
+        this.sound.setBgmPaused(true);
+      }
+      if (this.ui.crashModalTitle) this.ui.crashModalTitle.textContent = title;
+      if (this.ui.crashReportBox) this.ui.crashReportBox.textContent = reportText;
+      if (this.ui.btnCrashResume) {
+        this.ui.btnCrashResume.classList.toggle("hidden", !pauseGameplay);
+      }
+      if (this.ui.crashModal) this.ui.crashModal.classList.remove("hidden");
     }
 
     _bindCanvasContextRecovery() {
@@ -286,10 +367,24 @@
 
       this.batteries = [];
       this.decoyFires = [];
+      this.blueFireballs = [];
       this.fogZones = this._createInitialFogZones();
       this.inFogFactor = 0;
+      this.inPuddle = false;
+      this.nearLamp = null;
+      this.blueShockFlash = 0;
       this.particles = [];
+      this.map.resetInteractables();
       this._spawnInitialBatteries();
+
+      if (this.crashGuard) {
+        this.crashGuard.markSessionStart();
+        this.crashGuard.updateTelemetry({
+          difficulty: this.difficultyKey,
+          canvasPx: `${this.canvas.width}x${this.canvas.height}`,
+          maskPx: `${this.lighting.maskCanvas.width}x${this.lighting.maskCanvas.height}`
+        });
+      }
 
       // 立即定位相机
       this._updateCamera();
@@ -306,12 +401,15 @@
       const showMob = this.input.isTouchDevice || this.viewW <= 820;
       this.ui.mobileControls.classList.toggle("hidden", !showMob);
 
+      this.sound.startBgm();
       this.showToast("00:00 AM — 结界开启，坚持到 06:00 破晓！", false);
       this.sound.playShrineBell(0.24, 0, 1.0);
     }
 
     returnToTitle() {
       this.mode = "title";
+      this.sound.setBgmPaused(true);
+      if (this.crashGuard) this.crashGuard.markSessionCleanEnd("RETURN_TITLE");
       this.ui.hud.classList.add("hidden");
       this.ui.mobileControls.classList.add("hidden");
       this.ui.pauseScreen.classList.add("hidden");
@@ -323,10 +421,12 @@
     togglePause() {
       if (this.mode === "playing") {
         this.mode = "paused";
+        this.sound.setBgmPaused(true);
         this.ui.pauseStats.textContent = `当前时间：${this._formatGameTime()} AM · 电量 ${Math.ceil(this.player.battery)}%`;
         this.ui.pauseScreen.classList.remove("hidden");
       } else if (this.mode === "paused") {
         this.mode = "playing";
+        this.sound.setBgmPaused(false);
         this.ui.pauseScreen.classList.add("hidden");
         this.lastFrameTs = performance.now();
       }
@@ -438,6 +538,27 @@
       return seeds;
     }
 
+    _spawnBlueFireVolley(sx, sy, tx, ty, count = 3) {
+      const baseAngle = Math.atan2(ty - sy, tx - sx);
+      const spread = 0.28; // 扇形弹幕间距
+      const speed = 255;
+      const half = (count - 1) * 0.5;
+      for (let i = 0; i < count; i++) {
+        const a = baseAngle + (i - half) * spread;
+        this.blueFireballs.push({
+          x: sx + Math.cos(a) * 18,
+          y: sy + Math.sin(a) * 18,
+          vx: Math.cos(a) * speed,
+          vy: Math.sin(a) * speed,
+          radius: 10,
+          life: 2.4,
+          phase: i * 1.1
+        });
+      }
+      this.sound.playBlueFireCast();
+      this.showToast("小心！雫音撤退时甩出了蓝色狐火弹幕！", true);
+    }
+
     _spawnInitialBatteries() {
       const shuffled = [...this.map.batterySpawns].sort(() => Math.random() - 0.5);
       for (const pt of shuffled) {
@@ -469,6 +590,8 @@
 
     _triggerEnd(victory) {
       this.mode = victory ? "victory" : "gameover";
+      this.sound.setBgmPaused(true);
+      if (this.crashGuard) this.crashGuard.markSessionCleanEnd(victory ? "VICTORY" : "GAMEOVER");
       this.ui.hud.classList.add("hidden");
       this.ui.mobileControls.classList.add("hidden");
       this.ui.dangerVignette.style.opacity = "0";
@@ -514,13 +637,17 @@
           this.consecutiveErrors = 0;
         } catch (err) {
           this.consecutiveErrors += 1;
-          console.error("[Foxlight] Frame error:", err, {
-            mode: this.mode,
-            player: this.player ? { x: this.player.x, y: this.player.y, bat: this.player.battery } : null,
-            shizune: this.shizune ? { x: this.shizune.x, y: this.shizune.y, state: this.shizune.state } : null
-          });
-          // 若连续异常 5 帧，自动暂停并提示而非在后台无声推进或刷爆状态栈
-          if (this.consecutiveErrors >= 5 && this.mode === "playing") {
+          console.error("[Foxlight] Frame error:", err);
+          if (this.crashGuard) {
+            this.crashGuard.updateTelemetry({
+              mode: this.mode,
+              player: this.player ? { x: Math.round(this.player.x), y: Math.round(this.player.y), bat: Math.round(this.player.battery) } : null,
+              shizune: this.shizune ? { x: Math.round(this.shizune.x), y: Math.round(this.shizune.y), state: this.shizune.state } : null
+            });
+            if (this.consecutiveErrors >= 2) {
+              this.crashGuard.reportError("gameLoop", err);
+            }
+          } else if (this.consecutiveErrors >= 5 && this.mode === "playing") {
             this.togglePause();
             this.ui.pauseStats.textContent = "检测到渲染异常已自动暂停，可点击继续或重新开始";
           }
@@ -561,6 +688,7 @@
       }
       if (this.flashCooldown > 0) this.flashCooldown = Math.max(0, this.flashCooldown - dt);
       if (this.screenShake > 0) this.screenShake = Math.max(0, this.screenShake - dt * 24);
+      if (this.blueShockFlash > 0) this.blueShockFlash = Math.max(0, this.blueShockFlash - dt * 2.4);
       if (this.toastTimer > 0) {
         this.toastTimer -= dt;
         if (this.toastTimer <= 0) this.ui.toastBanner.classList.remove("show");
@@ -571,14 +699,66 @@
         if (o.shake > 0) o.shake = Math.max(0, o.shake - dt * 2.5);
       }
 
-      // 1. 玩家移动与朝向更新
+      // 1. 玩家移动与朝向更新（踩入水洼时显著减速至 58% 并触发水花特效！）
+      this.inPuddle = this.map.isPointInPuddle(this.player.x, this.player.y);
+      const speedMult = this.inPuddle ? 0.58 : 1.0;
+
       const move = this.input.getMoveVector();
       const moveMag = Math.hypot(move.x, move.y);
       if (moveMag > 0.05) {
-        this.player.x += move.x * this.player.speed * dt;
-        this.player.y += move.y * this.player.speed * dt;
-        this.player.walkPhase += dt * 11 * moveMag;
+        this.player.x += move.x * this.player.speed * speedMult * dt;
+        this.player.y += move.y * this.player.speed * speedMult * dt;
+        this.player.walkPhase += dt * 11 * moveMag * speedMult;
         this.map.resolveCircleCollisions(this.player);
+
+        if (this.inPuddle) {
+          this.sound.playWaterStep(nowMs);
+          if (Math.random() < dt * 12) {
+            this.particles.push({
+              x: this.player.x + (Math.random() - 0.5) * 14,
+              y: this.player.y + (Math.random() - 0.5) * 14,
+              vx: (Math.random() - 0.5) * 55,
+              vy: (Math.random() - 0.5) * 55,
+              life: 0.32,
+              maxLife: 0.32,
+              color: "#9ad8ff",
+              size: 2.8
+            });
+          }
+        }
+      }
+
+      // 1.5. 复古神社行灯互动（PC 长按 E / 手机长按点灯按钮 1.5s 点亮）
+      this.nearLamp = this.map.getInteractableLampNear(this.player.x, this.player.y, 78);
+      if (this.ui.mobInteractBtn) {
+        this.ui.mobInteractBtn.classList.toggle("hidden", !this.nearLamp);
+      }
+      for (const lamp of this.map.vintageLamps) {
+        if (lamp.lit) continue;
+        if (this.nearLamp && lamp.id === this.nearLamp.id && this.input.isInteractHeld()) {
+          lamp.progress = Math.min(1, lamp.progress + dt / 1.5);
+          if (lamp.progress >= 1) {
+            lamp.lit = true;
+            this.sound.playLampState(true);
+            this.showToast(`已点亮 ${lamp.name}！暖光范围内雫音攻击欲望大幅降低！`, false);
+            if (this.crashGuard) this.crashGuard.logEvent("LAMP_LIT", lamp.id);
+            for (let k = 0; k < 14; k++) {
+              const a = (Math.PI * 2 * k) / 14;
+              this.particles.push({
+                x: lamp.x,
+                y: lamp.y,
+                vx: Math.cos(a) * (40 + Math.random() * 75),
+                vy: Math.sin(a) * (40 + Math.random() * 75),
+                life: 0.45,
+                maxLife: 0.45,
+                color: "#ffd166",
+                size: 3.4
+              });
+            }
+          }
+        } else if (lamp.progress > 0) {
+          lamp.progress = Math.max(0, lamp.progress - dt * 1.4);
+        }
       }
 
       const targetAim = this.input.getAimAngle(
@@ -659,6 +839,62 @@
         if (df.life <= 0) this.decoyFires.splice(i, 1);
       }
 
+      // 4.2. 蓝色狐火弹幕飞行、障碍物拦截与命中削电判定
+      const shockDamage = this.difficultyKey === "nightmare" ? 18 : 14;
+      for (let i = this.blueFireballs.length - 1; i >= 0; i--) {
+        const fb = this.blueFireballs[i];
+        fb.life -= dt;
+        fb.phase += dt * 12;
+        const prevX = fb.x;
+        const prevY = fb.y;
+        fb.x += fb.vx * dt;
+        fb.y += fb.vy * dt;
+
+        // 撞击地图边缘或任何掩体障碍即爆散（玩家可躲掩体挡弹幕！）
+        const outOfBounds = fb.x < this.map.minX || fb.x > this.map.maxX || fb.y < this.map.minY || fb.y > this.map.maxY;
+        const hitWall = !this.map.hasLineOfSight(prevX, prevY, fb.x, fb.y, null);
+        if (fb.life <= 0 || outOfBounds || hitWall) {
+          this.blueFireballs.splice(i, 1);
+          for (let k = 0; k < 5; k++) {
+            const a = Math.random() * Math.PI * 2;
+            this.particles.push({
+              x: prevX,
+              y: prevY,
+              vx: Math.cos(a) * 65,
+              vy: Math.sin(a) * 65,
+              life: 0.24,
+              maxLife: 0.24,
+              color: "#57d8ff",
+              size: 2.5
+            });
+          }
+          continue;
+        }
+
+        // 命中熊太：直接损耗手电筒电量！
+        if (Math.hypot(fb.x - this.player.x, fb.y - this.player.y) < this.player.radius + fb.radius) {
+          this.blueFireballs.splice(i, 1);
+          this.player.battery = Math.max(0, this.player.battery - shockDamage);
+          this.blueShockFlash = 1.0;
+          this.screenShake = Math.max(this.screenShake, 7);
+          this.sound.playBatteryShock();
+          this.showToast(`被蓝色狐火击中！手电电量 -${shockDamage}%！`, true);
+          for (let k = 0; k < 10; k++) {
+            const a = (Math.PI * 2 * k) / 10;
+            this.particles.push({
+              x: this.player.x,
+              y: this.player.y,
+              vx: Math.cos(a) * 110,
+              vy: Math.sin(a) * 110,
+              life: 0.34,
+              maxLife: 0.34,
+              color: "#4ce6ff",
+              size: 3.2
+            });
+          }
+        }
+      }
+
       // 4.5. 范围迷雾缓慢漂移与玩家身处浓雾程度计算
       let targetFog = 0;
       for (const f of this.fogZones) {
@@ -691,6 +927,9 @@
         onToast: (msg, danger) => this.showToast(msg, danger),
         addDecoyFire: (x, y) => {
           this.decoyFires.push({ x, y, life: 4.5, phase: 0 });
+        },
+        spawnBlueFireVolley: (sx, sy, tx, ty, count) => {
+          this._spawnBlueFireVolley(sx, sy, tx, ty, count);
         }
       });
 
@@ -729,17 +968,42 @@
       this.ui.hudBatteryFill.classList.toggle("warn", pct <= 40 && pct > 20);
       this.ui.hudBatteryFill.classList.toggle("danger", pct <= 20);
 
-      // 走入妖雾区域时在状态栏提示（与 AI 统一采用 lightOn && battery > 0.1 有效亮灯条件）
+      // 走入妖雾区域或水洼/亮灯安全区时在状态栏提示
       const effectiveLightOn = this.player.lightOn && this.player.battery > 0.1;
-      if (this.inFogFactor > 0.35) {
+      const inLitLamp = !!this.map.getLitLampCovering(this.player.x, this.player.y);
+      if (this.inPuddle) {
+        this.ui.hudLightStatus.textContent = "积水减速中！";
+        this.ui.hudLightStatus.classList.add("off");
+      } else if (this.inFogFactor > 0.35) {
         this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 浓雾受阻" : "手电: 关闭(浓雾)";
         this.ui.hudLightStatus.classList.add("off");
+      } else if (inLitLamp) {
+        this.ui.hudLightStatus.textContent = effectiveLightOn ? "行灯庇护 · 开灯" : "行灯庇护 · 省电";
+        this.ui.hudLightStatus.classList.remove("off");
       } else {
         this.ui.hudLightStatus.textContent = effectiveLightOn ? "手电: 开启" : "手电: 关闭";
         this.ui.hudLightStatus.classList.toggle("off", !effectiveLightOn);
       }
       this.ui.mobToggleLabel.textContent = effectiveLightOn ? "关灯" : "开灯";
       this.ui.hudBatteryCount.textContent = `${this.batteriesCollected} 颗`;
+
+      if (this.ui.hudLampStatus) {
+        const litCount = this.map.vintageLamps.filter((l) => l.lit).length;
+        this.ui.hudLampStatus.textContent = this.nearLamp
+          ? "按住 E 点亮中…"
+          : `已亮 ${litCount}/${this.map.vintageLamps.length} · 按住 E`;
+      }
+
+      // 同步更新黑匣子遥测与 BGM 紧张度微微压低
+      if (this.crashGuard) {
+        this.crashGuard.updateTelemetry({
+          time: this._formatGameTime(),
+          battery: pct,
+          shizuneState: this.shizune.state,
+          blueFires: this.blueFireballs.length,
+          inPuddle: this.inPuddle
+        });
+      }
 
       // 爆闪冷却显示
       const cdActive = this.flashCooldown > 0.05;
@@ -758,10 +1022,11 @@
       this.ui.hudBpm.textContent = String(bpm);
       this.ui.hudBpmBox.classList.toggle("high", bpm >= 112);
 
-      // 危险心跳红边闪烁
+      // 危险心跳红边闪烁 & BGM 紧张轻压
       const pulse = 0.65 + 0.35 * Math.sin(this.totalTimeSec * (4 + totalDanger * 8));
       this.ui.dangerVignette.style.opacity = totalDanger > 0.25 ? ((totalDanger - 0.22) * pulse * 0.92).toFixed(3) : "0";
       this.sound.updateHeartbeat(nowMs, bpm, totalDanger);
+      this.sound.setBgmDuck(totalDanger > 0.52);
 
       // 右上角雫音预警条
       let alertActive = false;
@@ -818,6 +1083,21 @@
             ctx.fillRect(0, 0, this.map.width, this.map.height);
           }
 
+          // 1.5. 庭院积水洼陷阱（位于地面之上、角色之下）
+          this.map.drawPuddles(ctx, this.totalTimeSec, renderCamX, renderCamY, this.viewW, this.viewH);
+
+          // 1.8. 可交互复古神社行灯（暖光安全圈 + 充能进度环）
+          this.map.drawVintageLamps(
+            ctx,
+            this.totalTimeSec,
+            this.nearLamp ? this.nearLamp.id : null,
+            this.isMobilePerf,
+            renderCamX,
+            renderCamY,
+            this.viewW,
+            this.viewH
+          );
+
           // 2. 绘制电池道具
           this._drawBatteries(ctx);
 
@@ -827,10 +1107,10 @@
           // 4. 绘制男主角「三谷 熊太」
           this._drawPlayer(ctx);
 
-          // 5. 绘制女主角「稻荷姬 雫音」
+          // 5. 绘制女主角「稻荷姬 雫音」（灌木隐匿时自动隐藏本体！）
           this.shizune.draw(ctx, this.totalTimeSec);
 
-          // 6. 绘制神社障碍掩体（带视口剔除，提升帧率）
+          // 6. 绘制神社障碍掩体（底层基础绘制，受光面将在遮罩后精确重绘避免黑块阴影）
           const hidingId = this.shizune.state === "hiding" && this.shizune.hidingObstacle ? this.shizune.hidingObstacle.id : null;
           this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, this.viewW, this.viewH);
 
@@ -861,6 +1141,7 @@
           batteries: this.batteries,
           shizune: this.shizune,
           decoyFires: this.decoyFires,
+          blueFireballs: this.blueFireballs,
           fogZones: this.fogZones,
           flashBurstTimer: this.flashBurstTimer,
           burstSnapshot: this.burstSnapshot,
@@ -870,13 +1151,16 @@
           inFogFactor: this.inFogFactor
         });
 
-        // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、假狐火微光、低电电池指引）
+        // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、蓝色狐火弹幕、假狐火微光、低电电池指引）
         ctx.save();
         try {
           ctx.translate(-renderCamX, -renderCamY);
 
           const distToShizune = Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y);
           this.shizune.drawDarknessEyes(ctx, this.totalTimeSec, distToShizune, this.player);
+
+          // 绘制蓝色狐火弹幕（叠加 AI 生图生成的蓝色狐火 VFX 贴图，高亮醒目！）
+          this._drawBlueFireballs(ctx);
 
           for (const df of this.decoyFires) {
             const g = ctx.createRadialGradient(df.x, df.y, 2, df.x, df.y, 26);
@@ -919,7 +1203,47 @@
         } finally {
           ctx.restore();
         }
+
+        // 被蓝色狐火击中时的瞬时幽蓝屏幕电击反馈
+        if (this.blueShockFlash > 0.02) {
+          ctx.save();
+          ctx.fillStyle = `rgba(60, 196, 255, ${(this.blueShockFlash * 0.24).toFixed(3)})`;
+          ctx.fillRect(0, 0, this.viewW, this.viewH);
+          ctx.restore();
+        }
       } finally {
+        ctx.restore();
+      }
+    }
+
+    _drawBlueFireballs(ctx) {
+      for (const fb of this.blueFireballs) {
+        const pulse = 0.88 + Math.sin(fb.phase) * 0.14;
+        ctx.save();
+        ctx.translate(fb.x, fb.y);
+
+        // 冰蓝外焰光晕
+        const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 26 * pulse);
+        g.addColorStop(0, "rgba(220, 250, 255, 0.95)");
+        g.addColorStop(0.42, "rgba(56, 198, 255, 0.72)");
+        g.addColorStop(1, "rgba(24, 110, 255, 0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(0, 0, 26 * pulse, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 若生图贴图已加载，以 lighter 叠加混合呈现炫目蓝色狐火精灵！
+        if (this.blueFireImg.complete && this.blueFireImg.naturalWidth > 0) {
+          ctx.globalCompositeOperation = "lighter";
+          const sz = 36 * pulse;
+          ctx.drawImage(this.blueFireImg, -sz * 0.5, -sz * 0.5, sz, sz);
+        } else {
+          ctx.fillStyle = "#e6fbff";
+          ctx.beginPath();
+          ctx.arc(0, 0, 6.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
         ctx.restore();
       }
     }

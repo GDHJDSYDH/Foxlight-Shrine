@@ -17,12 +17,15 @@ class ShizuneAI {
     this.facingAngle = Math.PI;
     this.animTime = 0;
 
-    // 状态: 'stalk' | 'seek_cover' | 'hiding' | 'ambush' | 'retreat' | 'stunned'
+    // 状态: 'stalk' | 'seek_cover' | 'hiding' | 'ambush' | 'retreat' | 'stunned' | 'sabotage_lamp'
     this.state = "stalk";
     this.stateTimer = 0;
     this.hidingObstacle = null;
+    this.targetLamp = null;
     this.ambushTarget = { x: 0, y: 0 };
     this.retreatTarget = { x: 0, y: 0 };
+    this.isDarkHunting = false;
+    this.lampSabotageCooldown = 6.0;
 
     // A* 寻路缓存与反卡死监控
     this.path = [];
@@ -69,6 +72,9 @@ class ShizuneAI {
     this.state = "stalk";
     this.stateTimer = 0;
     this.hidingObstacle = null;
+    this.targetLamp = null;
+    this.lampSabotageCooldown = 6.0;
+    this.isDarkHunting = false;
     this.path = [];
     this.pathRecalcTimer = 0;
     this.lastCheckPos = { x: this.x, y: this.y };
@@ -84,6 +90,11 @@ class ShizuneAI {
     this.afterimages = [];
     this.repelCount = 0;
     this.spottedInCoverCount = 0;
+  }
+
+  // 雫音是否正藏身于灌木丛内部（此时隐藏本体，只露灌木晃动、红白狐尾和偶尔闪现的叶缝金瞳！）
+  isHiddenInBush() {
+    return this.state === "hiding" && this.hidingObstacle && this.hidingObstacle.type === "bush";
   }
 
   // 强光爆闪命中处理（使用与画面光束一致的快照出光点/朝向/射程，并用扫掠击退杜绝穿墙！）
@@ -124,6 +135,7 @@ class ShizuneAI {
     this.stateTimer = 2.5;
     this.litExposure = 0;
     this.hidingObstacle = null;
+    this.targetLamp = null;
     this.path = [];
     this.repelCount += 1;
 
@@ -140,6 +152,7 @@ class ShizuneAI {
     this.animTime += dt;
     this.stateTimer = Math.max(0, this.stateTimer - dt);
     this.ambushCooldown = Math.max(0, this.ambushCooldown - dt);
+    this.lampSabotageCooldown = Math.max(0, this.lampSabotageCooldown - dt);
     this.pathRecalcTimer = Math.max(0, this.pathRecalcTimer - dt);
     this.flankSwitchTimer -= dt;
     if (this.flankSwitchTimer <= 0) {
@@ -263,6 +276,14 @@ class ShizuneAI {
             gameState.onToast("手电驱散了雫音，她正退回暗处…", false);
           }
           sound.playFoxRetreat();
+          // 被普通手电逼退逃跑时，若在有效距离内，雫音会转身甩出幽蓝色狐火弹幕反击玩家！（被爆闪击晕则不会！）
+          if (distToPlayer < 450 && gameState.spawnBlueFireVolley) {
+            const volleyChance = hour >= 3 ? 0.9 : 0.78;
+            if (Math.random() < volleyChance) {
+              const count = hour >= 3 ? 4 : 3;
+              gameState.spawnBlueFireVolley(this.x, this.y, player.x, player.y, count);
+            }
+          }
           this._enterRetreat(player, true);
           return { caught: false, distToPlayer };
         }
@@ -303,20 +324,36 @@ class ShizuneAI {
           }
         : null;
 
+    // 当前玩家是否身处点亮的复古神社行灯保护区内（行灯会显著降低雫音的攻击欲望！）
+    const playerInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(player.x, player.y) : false;
+    const shizuneInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(this.x, this.y) : false;
+    const lampCalmingMult = playerInLitLamp || shizuneInLitLamp ? 0.78 : 1.0;
+
     // =========================================================================
-    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 反卡墙）
+    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 行灯压制与偷灭 + 反卡墙）
     // =========================================================================
     if (this.state === "stalk") {
-      // 【关灯狂猎模式】：主角关灯/没电时，雫音不再瞻前顾后躲掩体，而是锁定气味直接高速扑杀！
-      if (isLightOff) {
+      // 若地图上有玩家未守着的亮灯，雫音会找机会悄悄潜过去把灯吹灭！
+      if (this.lampSabotageCooldown <= 0 && !lit && Math.random() < dt * 0.55) {
+        const lamp = this._pickLampToExtinguish(player);
+        if (lamp) {
+          this.targetLamp = lamp;
+          this.state = "sabotage_lamp";
+          this.stateTimer = 7.5;
+          this.path = [];
+          this.pathRecalcTimer = 0;
+        }
+      }
+
+      // 【关灯狂猎模式】：主角关灯/没电且不在亮灯安全区时，雫音锁定气味高速扑杀！
+      if (this.state === "stalk" && isLightOff && !playerInLitLamp) {
         const clearCharge = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
         if (distToPlayer < 380 && this.ambushCooldown <= 0 && (clearCharge || distToPlayer < 260)) {
           this._startAmbush(player, sound, pan, gameState, true);
         } else {
-          // 暗处高频刷新 A* 路径，直线压缩距离紧逼主角
           this._navigateTo(player.x, player.y, baseSpeed * 1.18, dt, null, 0.22);
         }
-      } else {
+      } else if (this.state === "stalk") {
         // 若被手电刚照到且还没被驱散，立刻机敏侧闪找最近阴影掩体！
         if (lit && this.litExposure > 0.25 && Math.random() < dt * 3.5) {
           const quickCover = this._pickBestCover(player, true);
@@ -341,28 +378,55 @@ class ShizuneAI {
           }
         }
 
-        // 如果玩家背对着自己且已经很近且之间无墙阻挡，直接发动背后突袭！
+        // 如果玩家不在点亮的行灯区、背对着自己且已经很近且之间无墙阻挡，直接发动背后突袭！
         const playerLookingAtMe = this._isPlayerFacingPoint(player, this.x, this.y, 0.92);
         const clearChargePath = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
-        if (this.state === "stalk" && distToPlayer < 260 && !playerLookingAtMe && clearChargePath && this.ambushCooldown <= 0) {
+        if (this.state === "stalk" && !playerInLitLamp && distToPlayer < 260 && !playerLookingAtMe && clearChargePath && this.ambushCooldown <= 0) {
           this._startAmbush(player, sound, pan, gameState, false);
         } else if (this.state === "stalk") {
-          // 目标点不是傻傻直奔男主正脸，而是瞄准男主背后或侧后盲区（包抄点）
+          // 若玩家待在点亮的行灯安全圈里，雫音攻击欲望下降，倾向在外围游走盘旋等待灭灯机会
           let targetX = player.x;
           let targetY = player.y;
-          if (distToPlayer > 155 && avoidBeam) {
+          if (playerInLitLamp) {
+            const orbitA = Math.atan2(this.y - player.y, this.x - player.x) + this.flankSide * 0.75;
+            const orbitR = 235;
+            targetX = Math.max(this.map.minX + 40, Math.min(this.map.maxX - 40, player.x + Math.cos(orbitA) * orbitR));
+            targetY = Math.max(this.map.minY + 40, Math.min(this.map.maxY - 40, player.y + Math.sin(orbitA) * orbitR));
+          } else if (distToPlayer > 155 && avoidBeam) {
             const behindAngle = player.aimAngle + Math.PI + this.flankSide * 0.55;
             const offsetDist = Math.min(185, distToPlayer * 0.55);
             targetX = Math.max(this.map.minX + 40, Math.min(this.map.maxX - 40, player.x + Math.cos(behindAngle) * offsetDist));
             targetY = Math.max(this.map.minY + 40, Math.min(this.map.maxY - 40, player.y + Math.sin(behindAngle) * offsetDist));
           }
 
-          this._navigateTo(targetX, targetY, baseSpeed * (lit ? 0.82 : 1.05), dt, avoidBeam);
+          this._navigateTo(targetX, targetY, baseSpeed * lampCalmingMult * (lit ? 0.82 : 1.05), dt, avoidBeam);
+        }
+      }
+    } else if (this.state === "sabotage_lamp") {
+      // 悄悄潜过去吹熄玩家点亮的复古行灯！
+      if (!this.targetLamp || !this.targetLamp.lit || this.stateTimer <= 0 || lit) {
+        this.targetLamp = null;
+        this.state = "stalk";
+        this.path = [];
+      } else {
+        const dLamp = Math.hypot(this.targetLamp.x - this.x, this.targetLamp.y - this.y);
+        if (dLamp < 46) {
+          this.targetLamp.lit = false;
+          this.targetLamp.progress = 0;
+          this.lampSabotageCooldown = 13.0;
+          sound.playLampState(false);
+          sound.playShrineBell(0.28, pan, 0.92);
+          gameState.onToast(`${this.targetLamp.name} 被雫音悄悄吹灭了…`, true);
+          this.targetLamp = null;
+          this.state = "stalk";
+          this.path = [];
+        } else {
+          this._navigateTo(this.targetLamp.x, this.targetLamp.y, baseSpeed * 1.08, dt, avoidBeam, 0.35);
         }
       }
     } else if (this.state === "seek_cover") {
-      // 主角一旦关灯，正在赶往掩体的雫音立即放弃躲藏转为直接猎杀！
-      if (isLightOff) {
+      // 主角一旦关灯且不在亮灯安全区，正在赶往掩体的雫音立即放弃躲藏转为直接猎杀！
+      if (isLightOff && !playerInLitLamp) {
         this.hidingObstacle = null;
         this.state = "stalk";
         this.path = [];
@@ -386,7 +450,7 @@ class ShizuneAI {
     } else if (this.state === "hiding") {
       if (!this.hidingObstacle) {
         this.state = "stalk";
-      } else if (isLightOff) {
+      } else if (isLightOff && !playerInLitLamp) {
         // 躲在掩体里的雫音发现主角关灯，距离较近直接暴起突袭，较远则立刻出击追猎！
         if (distToPlayer < 420) {
           this._startAmbush(player, sound, pan, gameState, true);
@@ -396,7 +460,7 @@ class ShizuneAI {
           this.path = [];
         }
       } else {
-        // 机敏绕掩体滑步：男主绕过来时，雫音会绕着掩体另一侧平滑躲开，而不是卡在墙角
+        // 若躲藏在灌木丛（bush）内，位置贴合灌木隐藏点但不露本体；若是硬掩体则在背面滑步躲视线
         const spot = this.map.getHidingSpotBehind(this.hidingObstacle, player.x, player.y, 30);
         const d = Math.hypot(spot.x - this.x, spot.y - this.y);
         if (d > 10) {
@@ -409,7 +473,7 @@ class ShizuneAI {
         }
 
         const playerLookingAtCover = this._isPlayerFacingPoint(player, this.hidingObstacle.cx, this.hidingObstacle.cy, 0.72);
-        if ((distToPlayer < 295 && !playerLookingAtCover) || distToPlayer < 165) {
+        if (!playerInLitLamp && ((distToPlayer < 295 && !playerLookingAtCover) || distToPlayer < 165)) {
           this._startAmbush(player, sound, pan, gameState, false);
         } else if (this.stateTimer <= 0 || distToPlayer > 620) {
           this.hidingObstacle = null;
@@ -418,12 +482,12 @@ class ShizuneAI {
         }
       }
     } else if (this.state === "ambush") {
-      // 高速突袭扑击：正面持续被手电强照时速度明显受抑，给玩家反应和驱散窗口！
+      // 高速突袭扑击：正面持续被手电强照或进入亮灯安全区时速度明显受抑！
       if (this.afterimages.length < 10) {
         this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.65 });
       }
       const litSlow = lit ? (this.litExposure > 0.35 ? 0.36 : 0.58) : 1.0;
-      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * litSlow;
+      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * litSlow * lampCalmingMult;
       this._navigateTo(player.x, player.y, speed, dt, null, 0.18);
 
       const maxChaseDist = isLightOff ? 640 : 500;
@@ -634,6 +698,25 @@ class ShizuneAI {
     }
   }
 
+  _pickLampToExtinguish(player) {
+    if (!this.map.vintageLamps) return null;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const lamp of this.map.vintageLamps) {
+      if (!lamp.lit) continue;
+      const dPlayer = Math.hypot(lamp.x - player.x, lamp.y - player.y);
+      const dSelf = Math.hypot(lamp.x - this.x, lamp.y - this.y);
+      // 玩家离开该灯 220px 以上且玩家没死盯着灯时，雫音才会去偷灭它
+      if (dPlayer < 220 || dSelf > 760) continue;
+      const score = dPlayer * 0.7 - dSelf * 0.8;
+      if (score > bestScore) {
+        bestScore = score;
+        best = lamp;
+      }
+    }
+    return best;
+  }
+
   _pickBestCover(player, urgentDodge = false) {
     const list = this.map.getHideableObstacles();
     let best = null;
@@ -682,6 +765,22 @@ class ShizuneAI {
 
   // 绘制俯视角精致二次元风格的「稻荷姬 雫音」（白发红尾、狐耳红结金铃、红白巫女服）
   draw(ctx, timeSec) {
+    // 关键修复：当雫音藏身于灌木丛（bush）内部时，彻底隐藏她的常规本体！
+    // 只在灌木边缘呈现红白狐尾晃动与受照驱散环，避免出现“灌木露条尾巴+后面还站着一个完整本体”的穿帮！
+    if (this.isHiddenInBush()) {
+      if (this.litExposure > 0.05 && this.hidingObstacle) {
+        ctx.save();
+        ctx.translate(this.hidingObstacle.cx, this.hidingObstacle.cy);
+        ctx.strokeStyle = "rgba(255, 224, 128, 0.92)";
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, Math.max(this.hidingObstacle.w, this.hidingObstacle.h) * 0.52, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, this.litExposure));
+        ctx.stroke();
+        ctx.restore();
+      }
+      return;
+    }
+
     for (const img of this.afterimages) {
       ctx.save();
       ctx.translate(img.x, img.y);
@@ -831,22 +930,33 @@ class ShizuneAI {
     }
   }
 
-  // 在黑暗遮罩之上绘制暗处金瞳闪烁（严格遵循视线遮挡，不会隔墙透视眼睛！）
+  // 在黑暗遮罩之上绘制暗处金瞳闪烁（灌木隐匿态改为从灌木叶缝偶尔闪现双瞳，其它状态严格遵循视线遮挡）
   drawDarknessEyes(ctx, timeSec, distToPlayer, player) {
     if (this.state === "retreat" || this.state === "stunned") return;
     if (distToPlayer > 460) return;
 
-    // 若隔着障碍物，不透墙显示眼睛，保持悬疑与遮挡真实感
-    if (player && !this.map.hasLineOfSight(player.x, player.y, this.x, this.y, null)) {
+    const inBush = this.isHiddenInBush();
+    let eyeX = this.x;
+    let eyeY = this.y;
+
+    if (inBush && this.hidingObstacle) {
+      // 从灌木靠向玩家那一侧的叶缝里闪烁微弱金瞳
+      const ang = Math.atan2(player.y - this.hidingObstacle.cy, player.x - this.hidingObstacle.cx);
+      eyeX = this.hidingObstacle.cx + Math.cos(ang) * (this.hidingObstacle.w * 0.24);
+      eyeY = this.hidingObstacle.cy + Math.sin(ang) * (this.hidingObstacle.h * 0.24);
+      if (player && !this.map.hasLineOfSight(player.x, player.y, eyeX, eyeY, this.hidingObstacle)) {
+        return;
+      }
+    } else if (player && !this.map.hasLineOfSight(player.x, player.y, this.x, this.y, null)) {
       return;
     }
 
     const blink = Math.sin(timeSec * 4.5);
-    if (this.state === "hiding" && blink < 0.25) return;
+    if (this.state === "hiding" && blink < 0.35) return;
 
-    const alpha = this.state === "ambush" || this.isDarkHunting ? 0.95 : Math.max(0.18, (1 - distToPlayer / 460) * 0.85);
+    const alpha = this.state === "ambush" || this.isDarkHunting ? 0.95 : Math.max(0.2, (1 - distToPlayer / 460) * 0.85);
     ctx.save();
-    ctx.translate(this.x, this.y);
+    ctx.translate(eyeX, eyeY);
     ctx.rotate(this.facingAngle);
     ctx.globalAlpha = alpha;
 
