@@ -412,7 +412,6 @@
       this.ui.mobileControls.classList.toggle("hidden", !showMob);
 
       this.sound.startBgm();
-      this.showToast("00:00 AM — 结界开启，坚持到 06:00 破晓！", false);
       this.sound.playShrineBell(0.24, 0, 1.0);
     }
 
@@ -454,9 +453,9 @@
       if (!this.player.lightOn) {
         const inLitLamp = !!this.map.getLitLampCovering(this.player.x, this.player.y);
         if (inLitLamp) {
-          this.showToast("行灯庇护中：当前关灯安全，可安心节电！", false);
+          this.showToast("行灯庇护中：手电已关（安全节电）", false);
         } else {
-          this.showToast("手电已关闭！雫音察觉黑暗正在加速逼近！", true);
+          this.showToast("手电已关闭（节电中）", false);
         }
       }
     }
@@ -527,9 +526,7 @@
       this.shizune.hitByFlashBurst(
         this.player,
         this.sound,
-        (_type, msg) => {
-          this.showToast(msg, false);
-        },
+        null,
         this.burstSnapshot
       );
     }
@@ -574,7 +571,6 @@
         });
       }
       this.sound.playBlueFireCast();
-      this.showToast("小心！雫音撤退时甩出了蓝色狐火（前1秒穿障）！", true);
     }
 
     _spawnInitialBatteries() {
@@ -685,16 +681,14 @@
         return;
       }
 
-      // 阶段切换提示（02:00 / 04:00）
+      // 阶段切换（02:00 / 04:00 仅以清脆铃音提示，上方横幅专注显示玩家自身讯息）
       const hour = dawnProgress * 6;
       const phaseIdx = hour < 2 ? 0 : hour < 4 ? 1 : 2;
       if (phaseIdx !== this.lastPhaseIndex) {
         this.lastPhaseIndex = phaseIdx;
         if (phaseIdx === 1) {
-          this.showToast("02:00 AM — 狐火迷踪！小心掩体间的假狐火诱饵！", true);
           this.sound.playShrineBell(0.32, 0, 0.94);
         } else if (phaseIdx === 2) {
-          this.showToast("04:00 AM — 浓雾弥漫！雫音的执念变得更加强烈！", true);
           this.sound.playShrineBell(0.36, 0, 0.88);
         }
       }
@@ -758,7 +752,7 @@
           if (lamp.progress >= 1) {
             lamp.lit = true;
             this.sound.playLampState(true);
-            this.showToast(`已点亮 ${lamp.name}！暖光范围内雫音攻击欲望大幅降低！`, false);
+            this.showToast(`已点亮 ${lamp.name}（安全区已开启）`, false);
             if (this.crashGuard) this.crashGuard.logEvent("LAMP_LIT", lamp.id);
             for (let k = 0; k < 14; k++) {
               const a = (Math.PI * 2 * k) / 14;
@@ -904,7 +898,7 @@
           this.blueShockFlash = 1.0;
           this.screenShake = Math.max(this.screenShake, 7);
           this.sound.playBatteryShock();
-          this.showToast(`被蓝色狐火击中！手电电量 -${shockDamage}%！`, true);
+          this.showToast(`电量受损 -${shockDamage}%！`, true);
           for (let k = 0; k < 10; k++) {
             const a = (Math.PI * 2 * k) / 10;
             this.particles.push({
@@ -1057,27 +1051,9 @@
       this.sound.updateHeartbeat(nowMs, bpm, totalDanger);
       this.sound.setBgmDuck(totalDanger > 0.52);
 
-      // 右上角雫音预警条
-      let alertActive = false;
-      let alertText = "";
-      if (this.shizune.state === "ambush") {
-        alertActive = true;
-        alertText = this.shizune.isDarkHunting ? "黑暗狂猎！雫音高速扑来！" : "突袭扑来！快用强光！";
-      } else if (this.shizune.isDarkHunting && distToShizune < 480 && this.shizune.state !== "retreat") {
-        alertActive = true;
-        alertText = "关灯危险！雫音正循声急追！";
-      } else if (this.shizune.state === "hiding" && distToShizune < 380) {
-        alertActive = true;
-        alertText = "附近掩体有铃音晃动…";
-      } else if (distToShizune < 300 && this.shizune.state !== "retreat") {
-        alertActive = true;
-        alertText = "气息就在近处！";
-      }
-
-      this.ui.shizuneAlert.classList.toggle("active", alertActive);
-      if (alertActive && alertText !== this._lastHudAlertText) {
-        this._lastHudAlertText = alertText;
-        this.ui.shizuneAlertText.textContent = alertText;
+      // 保持界面上方清爽专注：隐藏右上角雫音实时状态透剧预警，仅靠听铃声、看心跳 BPM 与观察场景判断动向！
+      if (this.ui.shizuneAlert) {
+        this.ui.shizuneAlert.classList.remove("active");
       }
     }
 

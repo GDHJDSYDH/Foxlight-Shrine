@@ -277,9 +277,6 @@ class ShizuneAI {
           this.repelCount += 1;
           if (coverSpotted) {
             this.spottedInCoverCount += 1;
-            gameState.onToast("识破埋伏！雫音从掩体后惊退撤离！", false);
-          } else {
-            gameState.onToast("手电驱散了雫音，她正退回暗处…", false);
           }
           sound.playFoxRetreat();
           // 被普通手电逼退逃跑时，若在有效距离内，雫音会转身甩出幽蓝色狐火弹幕反击玩家！（被爆闪击晕则不会！）
@@ -417,7 +414,6 @@ class ShizuneAI {
           this.lampSabotageCooldown = 13.0;
           sound.playLampState(false);
           sound.playShrineBell(0.28, pan, 0.92);
-          gameState.onToast(`${this.targetLamp.name} 被雫音悄悄吹灭了…`, true);
           this.targetLamp = null;
           this.state = "stalk";
           this.path = [];
@@ -667,10 +663,6 @@ class ShizuneAI {
     this.pathRecalcTimer = 0;
     this.ambushTarget = { x: player.x, y: player.y };
     sound.playAmbushCue(pan);
-    gameState.onToast(
-      fromDarkHunt ? "手电已灭！雫音借着黑暗高速扑来了！" : "叮铃——！雫音正从暗处扑来！",
-      true
-    );
   }
 
   _enterRetreat(player, spawnParticles) {
