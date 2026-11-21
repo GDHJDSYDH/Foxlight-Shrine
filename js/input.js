@@ -226,8 +226,8 @@ class InputController {
     return { x, y };
   }
 
-  // 计算手电筒目标角度
-  getAimAngle(playerWorldX, playerWorldY, camX, camY, currentAngle, moveVec) {
+  // 计算手电筒目标角度（支持动态镜头缩放 cameraZoom 的精确屏幕->世界坐标反算）
+  getAimAngle(playerWorldX, playerWorldY, camX, camY, currentAngle, moveVec, cameraZoom = 1) {
     // 移动端右摇杆优先级最高
     if (this.aimStick.active && this.aimStick.angle !== null) {
       return this.aimStick.angle;
@@ -235,8 +235,9 @@ class InputController {
 
     // 电脑端鼠标瞄准（按住 Shift 可临时锁定朝移动方向；鼠标在主角中心极近范围 < 8px 时保持上一次稳定方向避免抖动）
     if (this.usingMouseAim && !this.keys.has("ShiftLeft") && !this.keys.has("ShiftRight")) {
-      const worldMouseX = this.mouseScreenX + camX;
-      const worldMouseY = this.mouseScreenY + camY;
+      const z = cameraZoom > 0.1 ? cameraZoom : 1;
+      const worldMouseX = camX + this.mouseScreenX / z;
+      const worldMouseY = camY + this.mouseScreenY / z;
       const dx = worldMouseX - playerWorldX;
       const dy = worldMouseY - playerWorldY;
       if (dx * dx + dy * dy > 64) {

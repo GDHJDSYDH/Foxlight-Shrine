@@ -176,19 +176,25 @@ class ShizuneAI {
       this.path = [];
     }
 
+    // 当前玩家是否身处点亮的复古神社行灯保护区内（站在灯范围内关灯，绝不提升雫音攻击欲望！）
+    const playerInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(player.x, player.y) : false;
+    const shizuneInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(this.x, this.y) : false;
+    const lampCalmingMult = playerInLitLamp || shizuneInLitLamp ? 0.78 : 1.0;
+
     // 阶段难度加成（00:00 -> 06:00 平滑提升）
     const hour = gameState.dawnProgress * 6;
     const stageMult = 1 + Math.min(0.42, hour * 0.068);
 
-    // 暗夜猎杀模式：主角手电筒关闭（或没电）时，雫音立刻变得极具攻击性！
+    // 暗夜猎杀模式：仅当主角手电筒关闭（或没电）且“不在点亮的复古行灯保护范围内”时，雫音才会进入高攻击性狂猎！
     const isLightOff = !player.lightOn || player.battery <= 0.1;
+    const triggerDarkHunt = isLightOff && !playerInLitLamp;
     let darkAggroMult = 1.0;
-    if (isLightOff) {
+    if (triggerDarkHunt) {
       // 关灯瞬间移速 +20%，持续关灯超过 2 秒最高叠加到 +42%！
       darkAggroMult = 1.2 + Math.min(0.22, player.lightOffDuration * 0.09);
     }
     const baseSpeed = this.cfg.shizuneSpeed * stageMult * darkAggroMult;
-    this.isDarkHunting = isLightOff;
+    this.isDarkHunting = triggerDarkHunt;
 
     const dxToPlayer = player.x - this.x;
     const dyToPlayer = player.y - this.y;
@@ -324,11 +330,6 @@ class ShizuneAI {
           }
         : null;
 
-    // 当前玩家是否身处点亮的复古神社行灯保护区内（行灯会显著降低雫音的攻击欲望！）
-    const playerInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(player.x, player.y) : false;
-    const shizuneInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(this.x, this.y) : false;
-    const lampCalmingMult = playerInLitLamp || shizuneInLitLamp ? 0.78 : 1.0;
-
     // =========================================================================
     // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 行灯压制与偷灭 + 反卡墙）
     // =========================================================================
@@ -346,7 +347,7 @@ class ShizuneAI {
       }
 
       // 【关灯狂猎模式】：主角关灯/没电且不在亮灯安全区时，雫音锁定气味高速扑杀！
-      if (this.state === "stalk" && isLightOff && !playerInLitLamp) {
+      if (this.state === "stalk" && triggerDarkHunt) {
         const clearCharge = this.map.isSegmentWalkable(this.x, this.y, player.x, player.y, 16);
         if (distToPlayer < 380 && this.ambushCooldown <= 0 && (clearCharge || distToPlayer < 260)) {
           this._startAmbush(player, sound, pan, gameState, true);
@@ -426,7 +427,7 @@ class ShizuneAI {
       }
     } else if (this.state === "seek_cover") {
       // 主角一旦关灯且不在亮灯安全区，正在赶往掩体的雫音立即放弃躲藏转为直接猎杀！
-      if (isLightOff && !playerInLitLamp) {
+      if (triggerDarkHunt) {
         this.hidingObstacle = null;
         this.state = "stalk";
         this.path = [];
@@ -450,8 +451,8 @@ class ShizuneAI {
     } else if (this.state === "hiding") {
       if (!this.hidingObstacle) {
         this.state = "stalk";
-      } else if (isLightOff && !playerInLitLamp) {
-        // 躲在掩体里的雫音发现主角关灯，距离较近直接暴起突袭，较远则立刻出击追猎！
+      } else if (triggerDarkHunt) {
+        // 躲在掩体里的雫音发现主角在黑暗中关灯，距离较近直接暴起突袭，较远则立刻出击追猎！
         if (distToPlayer < 420) {
           this._startAmbush(player, sound, pan, gameState, true);
         } else {
@@ -487,12 +488,12 @@ class ShizuneAI {
         this.afterimages.push({ x: this.x, y: this.y, angle: this.facingAngle, alpha: 0.65 });
       }
       const litSlow = lit ? (this.litExposure > 0.35 ? 0.36 : 0.58) : 1.0;
-      const speed = baseSpeed * (isLightOff ? 1.82 : 1.72) * litSlow * lampCalmingMult;
+      const speed = baseSpeed * (triggerDarkHunt ? 1.82 : 1.72) * litSlow * lampCalmingMult;
       this._navigateTo(player.x, player.y, speed, dt, null, 0.18);
 
-      const maxChaseDist = isLightOff ? 640 : 500;
+      const maxChaseDist = triggerDarkHunt ? 640 : 500;
       if (this.stateTimer <= 0 || distToPlayer > maxChaseDist) {
-        this.ambushCooldown = isLightOff ? Math.max(0.9, 1.8 - hour * 0.15) : Math.max(2.0, 4.2 - hour * 0.35);
+        this.ambushCooldown = triggerDarkHunt ? Math.max(0.9, 1.8 - hour * 0.15) : Math.max(2.0, 4.2 - hour * 0.35);
         this.state = "stalk";
         this.path = [];
       }
@@ -504,7 +505,7 @@ class ShizuneAI {
       const d = Math.hypot(this.retreatTarget.x - this.x, this.retreatTarget.y - this.y);
       if (d < 38 || this.stateTimer <= 0) {
         this.state = "stalk";
-        this.ambushCooldown = isLightOff ? 0.8 : 1.8;
+        this.ambushCooldown = triggerDarkHunt ? 0.8 : 1.8;
         this.path = [];
       } else {
         this._navigateTo(this.retreatTarget.x, this.retreatTarget.y, baseSpeed * 1.95, dt, avoidBeam, 0.35);

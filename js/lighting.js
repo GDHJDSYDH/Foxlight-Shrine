@@ -225,12 +225,16 @@ class LightingSystem {
       dawnProgress,
       flickerFactor,
       timeSec,
-      inFogFactor
+      inFogFactor,
+      cameraZoom
     } = state;
 
+    const zoom = cameraZoom && cameraZoom > 0.1 ? cameraZoom : 1;
+    const worldViewW = viewW / zoom;
+    const worldViewH = viewH / zoom;
     const mctx = this.maskCtx;
-    const sx = this.scale || 0.6;
-    const sy = this.scaleY || sx;
+    const sx = (this.scale || 0.6) * zoom;
+    const sy = (this.scaleY || this.scale || 0.6) * zoom;
     const mw = this.maskCanvas.width;
     const mh = this.maskCanvas.height;
     if (mw <= 0 || mh <= 0 || !Number.isFinite(player.x) || !Number.isFinite(player.y)) {
@@ -435,6 +439,7 @@ class LightingSystem {
     if (map.drawLitObstacleHighlights) {
       mainCtx.save();
       try {
+        mainCtx.scale(zoom, zoom);
         mainCtx.translate(-camX, -camY);
         const hidingId = shizune && shizune.state === "hiding" && shizune.hidingObstacle ? shizune.hidingObstacle.id : null;
         map.drawLitObstacleHighlights(
@@ -448,8 +453,8 @@ class LightingSystem {
           hidingId,
           camX,
           camY,
-          viewW,
-          viewH
+          worldViewW,
+          worldViewH
         );
       } finally {
         mainCtx.restore();
@@ -460,6 +465,7 @@ class LightingSystem {
     if (beamPoly && beamPoly.length >= 3) {
       mainCtx.save();
       try {
+        mainCtx.scale(zoom, zoom);
         mainCtx.translate(-camX, -camY);
         mainCtx.globalCompositeOperation = "lighter";
         mainCtx.beginPath();
@@ -489,21 +495,37 @@ class LightingSystem {
       }
     }
 
-    // 范围迷雾系统渲染
-    this._renderFogLayer(mainCtx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor || 0);
+    // 范围迷雾系统渲染（与 cameraZoom 同步缩放，电脑端视野范围与手机端严格拉平！）
+    this._renderFogLayer(
+      mainCtx,
+      viewW,
+      viewH,
+      camX,
+      camY,
+      player,
+      fogZones,
+      dawnProgress,
+      timeSec,
+      inFogFactor || 0,
+      zoom
+    );
 
     return beamPoly;
   }
 
-  _renderFogLayer(ctx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor) {
+  _renderFogLayer(ctx, viewW, viewH, camX, camY, player, fogZones, dawnProgress, timeSec, inFogFactor, zoom = 1) {
+    const worldViewW = viewW / zoom;
+    const worldViewH = viewH / zoom;
+
     // 1. 世界空间中的局部漂浮浓雾区（带屏幕视口剔除）
     if (fogZones && fogZones.length > 0) {
       ctx.save();
+      ctx.scale(zoom, zoom);
       ctx.translate(-camX, -camY);
       for (const f of fogZones) {
         const sx = f.x - camX;
         const sy = f.y - camY;
-        if (sx + f.radius < -40 || sx - f.radius > viewW + 40 || sy + f.radius < -40 || sy - f.radius > viewH + 40) {
+        if (sx + f.radius < -40 || sx - f.radius > worldViewW + 40 || sy + f.radius < -40 || sy - f.radius > worldViewH + 40) {
           continue;
         }
         const pulse = 0.85 + Math.sin(timeSec * 1.1 + f.phase) * 0.15;
@@ -521,21 +543,23 @@ class LightingSystem {
       ctx.restore();
     }
 
-    // 2. 围绕玩家的环形范围迷雾（参数严格做非零保护，避免极端窗口尺寸下 createRadialGradient 报错）
-    const px = player.x - camX;
-    const py = player.y - camY;
+    // 2. 围绕玩家的环形范围迷雾（电脑端按固定世界单位半径收紧，彻底消除宽屏额外视野红利）
+    const px = (player.x - camX) * zoom;
+    const py = (player.y - camY) * zoom;
     const hour = dawnProgress * 6;
-    const baseClearRadius = Math.max(120, 390 - hour * 18 - inFogFactor * 125);
-    const innerR = Math.max(10, baseClearRadius * 0.55);
-    const outerRadius = Math.max(innerR + 60, Math.max(viewW, viewH) * 0.78);
-    const fogOpacity = Math.min(0.86, 0.44 + hour * 0.045 + inFogFactor * 0.28);
+    const worldClearRadius = Math.max(120, 355 - hour * 16 - inFogFactor * 115);
+    const innerR = Math.max(10, worldClearRadius * 0.52 * zoom);
+    // 电脑端将外圈黑雾截止半径也锚定在世界视野上限（约 470 世界单位），确保大屏无法靠边角偷看远处！
+    const maxWorldOuter = this.isMobile ? Math.max(worldViewW, worldViewH) * 0.78 : 495;
+    const outerRadius = Math.max(innerR + 75, Math.min(Math.max(viewW, viewH) * 0.78, maxWorldOuter * zoom));
+    const fogOpacity = Math.min(0.92, (this.isMobile ? 0.44 : 0.62) + hour * 0.045 + inFogFactor * 0.25);
 
     ctx.save();
     const ringGrad = ctx.createRadialGradient(px, py, innerR, px, py, outerRadius);
     ringGrad.addColorStop(0, "rgba(18, 26, 46, 0)");
-    ringGrad.addColorStop(0.42, `rgba(22, 32, 56, ${(fogOpacity * 0.36).toFixed(3)})`);
-    ringGrad.addColorStop(0.75, `rgba(14, 21, 38, ${(fogOpacity * 0.78).toFixed(3)})`);
-    ringGrad.addColorStop(1, `rgba(8, 12, 24, ${fogOpacity.toFixed(3)})`);
+    ringGrad.addColorStop(0.42, `rgba(22, 32, 56, ${(fogOpacity * 0.38).toFixed(3)})`);
+    ringGrad.addColorStop(0.76, `rgba(12, 19, 36, ${(fogOpacity * 0.84).toFixed(3)})`);
+    ringGrad.addColorStop(1, `rgba(7, 11, 22, ${fogOpacity.toFixed(3)})`);
     ctx.fillStyle = ringGrad;
     ctx.fillRect(0, 0, viewW, viewH);
 

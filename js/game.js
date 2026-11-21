@@ -140,9 +140,10 @@
       this._contextLost = false;
       this._renderDpr = 1;
 
-      // 相机（平滑跟随熊太）
+      // 相机（严格锁定在主角正中 + 跨端视野缩放，拉平电脑端与手机端可见范围）
       this.camX = 0;
       this.camY = 0;
+      this.cameraZoom = 1.0;
       this.viewW = window.innerWidth;
       this.viewH = window.innerHeight;
 
@@ -321,6 +322,15 @@
       this.viewH = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 640);
       this.isMobilePerf = this.input.isTouchDevice || this.viewW <= 820;
 
+      // 计算跨端公平视野缩放（手机端保持 1.0x，电脑端大屏自动拉近至 ~1.30x-1.65x，避免电脑端视野过大降低难度！）
+      if (this.isMobilePerf) {
+        this.cameraZoom = 1.0;
+      } else {
+        const diag = Math.hypot(this.viewW, this.viewH);
+        // 以 ~960 世界对角线为公平目标视野，确保 1280x720 约 1.38x、1920x1080 约 1.65x
+        this.cameraZoom = Math.max(1.22, Math.min(1.68, diag / 1060));
+      }
+
       // 按总像素上限动态约束物理分辨率，避免 4K / 高分屏桌面显存暴涨引发 GPU 重置或浏览器崩溃
       const rawDpr = Math.min(window.devicePixelRatio || 1, this.isMobilePerf ? 1.25 : 1.5);
       const maxPixels = this.isMobilePerf ? 900000 : 2600000;
@@ -442,7 +452,12 @@
       this.sound.playClick(this.player.lightOn);
       this.ui.mobToggleLabel.textContent = this.player.lightOn ? "关灯" : "开灯";
       if (!this.player.lightOn) {
-        this.showToast("手电已关闭！雫音察觉黑暗正在加速逼近！", true);
+        const inLitLamp = !!this.map.getLitLampCovering(this.player.x, this.player.y);
+        if (inLitLamp) {
+          this.showToast("行灯庇护中：当前关灯安全，可安心节电！", false);
+        } else {
+          this.showToast("手电已关闭！雫音察觉黑暗正在加速逼近！", true);
+        }
       }
     }
 
@@ -462,7 +477,8 @@
         this.camX,
         this.camY,
         this.player.aimAngle,
-        move
+        move,
+        this.cameraZoom
       );
       if (Number.isFinite(instantAim)) {
         this.player.aimAngle = Math.atan2(Math.sin(instantAim), Math.cos(instantAim));
@@ -551,12 +567,14 @@
           vx: Math.cos(a) * speed,
           vy: Math.sin(a) * speed,
           radius: 10,
-          life: 2.4,
+          age: 0,
+          phaseThroughSec: 1.0, // 发射后第 1 秒可穿透障碍物！
+          life: 2.8,
           phase: i * 1.1
         });
       }
       this.sound.playBlueFireCast();
-      this.showToast("小心！雫音撤退时甩出了蓝色狐火弹幕！", true);
+      this.showToast("小心！雫音撤退时甩出了蓝色狐火（前1秒穿障）！", true);
     }
 
     _spawnInitialBatteries() {
@@ -767,7 +785,8 @@
         this.camX,
         this.camY,
         this.player.aimAngle,
-        move
+        move,
+        this.cameraZoom
       );
       // 平滑旋转手电筒（使用无 while 的安全角度归一化，杜绝 NaN/Infinity 死循环）
       if (Number.isFinite(targetAim)) {
@@ -782,7 +801,8 @@
       // 4:00后结界雾气微缩手电筒最大射程
       this.player.lightRange = hour >= 4 ? 315 : 345;
 
-      // 2. 手电筒电量消耗（统一有效亮灯判定，防止电量为 0 时 lightOn 仍为 true）
+      // 2. 手电筒电量消耗（统一有效亮灯判定；站在亮灯安全区关灯时不累计黑暗时长，不刺激雫音！）
+      const playerInLitLamp = !!this.map.getLitLampCovering(this.player.x, this.player.y);
       if (this.player.lightOn && this.player.battery > 0.1) {
         this.player.battery = Math.max(0, this.player.battery - this.cfg.batteryDrain * dt);
         this.player.lightOffDuration = 0;
@@ -794,7 +814,11 @@
         }
       } else {
         if (this.player.battery <= 0.1) this.player.lightOn = false;
-        this.player.lightOffDuration += dt;
+        if (playerInLitLamp) {
+          this.player.lightOffDuration = 0;
+        } else {
+          this.player.lightOffDuration += dt;
+        }
       }
 
       // 3. 电池拾取与补充刷新
@@ -839,10 +863,11 @@
         if (df.life <= 0) this.decoyFires.splice(i, 1);
       }
 
-      // 4.2. 蓝色狐火弹幕飞行、障碍物拦截与命中削电判定
+      // 4.2. 蓝色狐火弹幕飞行、前 1.0 秒穿透障碍物与命中削电判定
       const shockDamage = this.difficultyKey === "nightmare" ? 18 : 14;
       for (let i = this.blueFireballs.length - 1; i >= 0; i--) {
         const fb = this.blueFireballs[i];
+        fb.age = (fb.age || 0) + dt;
         fb.life -= dt;
         fb.phase += dt * 12;
         const prevX = fb.x;
@@ -850,9 +875,10 @@
         fb.x += fb.vx * dt;
         fb.y += fb.vy * dt;
 
-        // 撞击地图边缘或任何掩体障碍即爆散（玩家可躲掩体挡弹幕！）
+        // 发射后前 1.0 秒为灵火穿障态，无视障碍物；满 1.0 秒后撞障碍即爆散（始终在地图外围石墙处消散）
         const outOfBounds = fb.x < this.map.minX || fb.x > this.map.maxX || fb.y < this.map.minY || fb.y > this.map.maxY;
-        const hitWall = !this.map.hasLineOfSight(prevX, prevY, fb.x, fb.y, null);
+        const isPhasing = fb.age < (fb.phaseThroughSec || 1.0);
+        const hitWall = !isPhasing && !this.map.hasLineOfSight(prevX, prevY, fb.x, fb.y, null);
         if (fb.life <= 0 || outOfBounds || hitWall) {
           this.blueFireballs.splice(i, 1);
           for (let k = 0; k < 5; k++) {
@@ -950,9 +976,12 @@
     }
 
     _updateCamera() {
-      // 主角始终严格锁定在屏幕正中央 (viewW * 0.5, viewH * 0.5)
-      this.camX = this.player.x - this.viewW * 0.5;
-      this.camY = this.player.y - this.viewH * 0.5;
+      // 主角始终严格锁定在屏幕正中央（配合 cameraZoom 计算世界可视宽高）
+      const z = this.cameraZoom > 0.1 ? this.cameraZoom : 1;
+      const worldViewW = this.viewW / z;
+      const worldViewH = this.viewH / z;
+      this.camX = this.player.x - worldViewW * 0.5;
+      this.camY = this.player.y - worldViewH * 0.5;
     }
 
     _updateHUD(dawnProgress, distToShizune, nowMs) {
@@ -1064,14 +1093,18 @@
         ctx.fillStyle = "#080c18";
         ctx.fillRect(0, 0, this.viewW, this.viewH);
 
-        // 屏幕震动偏移
-        const shakeX = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
-        const shakeY = this.screenShake > 0 ? (Math.random() - 0.5) * this.screenShake : 0;
+        // 屏幕震动偏移（换算到世界坐标）
+        const zoom = this.cameraZoom > 0.1 ? this.cameraZoom : 1;
+        const worldViewW = this.viewW / zoom;
+        const worldViewH = this.viewH / zoom;
+        const shakeX = this.screenShake > 0 ? ((Math.random() - 0.5) * this.screenShake) / zoom : 0;
+        const shakeY = this.screenShake > 0 ? ((Math.random() - 0.5) * this.screenShake) / zoom : 0;
         const renderCamX = this.camX + shakeX;
         const renderCamY = this.camY + shakeY;
 
         ctx.save();
         try {
+          ctx.scale(zoom, zoom);
           ctx.translate(-renderCamX, -renderCamY);
 
           // 1. 神社石板地面纹理
@@ -1084,7 +1117,7 @@
           }
 
           // 1.5. 庭院积水洼陷阱（位于地面之上、角色之下）
-          this.map.drawPuddles(ctx, this.totalTimeSec, renderCamX, renderCamY, this.viewW, this.viewH);
+          this.map.drawPuddles(ctx, this.totalTimeSec, renderCamX, renderCamY, worldViewW, worldViewH);
 
           // 1.8. 可交互复古神社行灯（暖光安全圈 + 充能进度环）
           this.map.drawVintageLamps(
@@ -1094,8 +1127,8 @@
             this.isMobilePerf,
             renderCamX,
             renderCamY,
-            this.viewW,
-            this.viewH
+            worldViewW,
+            worldViewH
           );
 
           // 2. 绘制电池道具
@@ -1112,7 +1145,7 @@
 
           // 6. 绘制神社障碍掩体（底层基础绘制，受光面将在遮罩后精确重绘避免黑块阴影）
           const hidingId = this.shizune.state === "hiding" && this.shizune.hidingObstacle ? this.shizune.hidingObstacle.id : null;
-          this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, this.viewW, this.viewH);
+          this.map.drawObstacles(ctx, this.totalTimeSec, hidingId, hidingId ? 1 : 0, renderCamX, renderCamY, worldViewW, worldViewH);
 
           // 7. 绘制粒子特效
           for (const p of this.particles) {
@@ -1148,12 +1181,14 @@
           dawnProgress,
           flickerFactor,
           timeSec: this.totalTimeSec,
-          inFogFactor: this.inFogFactor
+          inFogFactor: this.inFogFactor,
+          cameraZoom: zoom
         });
 
         // 9. 在黑暗遮罩之上的微弱氛围提示层（雫音暗处金瞳、蓝色狐火弹幕、假狐火微光、低电电池指引）
         ctx.save();
         try {
+          ctx.scale(zoom, zoom);
           ctx.translate(-renderCamX, -renderCamY);
 
           const distToShizune = Math.hypot(this.shizune.x - this.player.x, this.shizune.y - this.player.y);
@@ -1219,13 +1254,26 @@
     _drawBlueFireballs(ctx) {
       for (const fb of this.blueFireballs) {
         const pulse = 0.88 + Math.sin(fb.phase) * 0.14;
+        const isPhasing = (fb.age || 0) < (fb.phaseThroughSec || 1.0);
         ctx.save();
         ctx.translate(fb.x, fb.y);
 
-        // 冰蓝外焰光晕
+        // 前 1.0 秒穿透态显示幽紫青灵火光环提示玩家可穿障；1.0 秒后转为实火亮青焰
+        if (isPhasing) {
+          ctx.globalAlpha = 0.84;
+          ctx.strokeStyle = "rgba(182, 148, 255, 0.72)";
+          ctx.lineWidth = 1.8;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.arc(0, 0, 17 * pulse, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        // 冰蓝/幽紫青外焰光晕
         const g = ctx.createRadialGradient(0, 0, 2, 0, 0, 26 * pulse);
-        g.addColorStop(0, "rgba(220, 250, 255, 0.95)");
-        g.addColorStop(0.42, "rgba(56, 198, 255, 0.72)");
+        g.addColorStop(0, "rgba(225, 250, 255, 0.95)");
+        g.addColorStop(0.42, isPhasing ? "rgba(116, 168, 255, 0.74)" : "rgba(56, 198, 255, 0.74)");
         g.addColorStop(1, "rgba(24, 110, 255, 0)");
         ctx.fillStyle = g;
         ctx.beginPath();
