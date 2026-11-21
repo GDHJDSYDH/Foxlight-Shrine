@@ -17,7 +17,7 @@ class ShizuneAI {
     this.facingAngle = Math.PI;
     this.animTime = 0;
 
-    // 状态: 'stalk' | 'seek_cover' | 'hiding' | 'ambush' | 'retreat' | 'stunned' | 'sabotage_lamp'
+    // 状态: 'stalk' | 'seek_cover' | 'hiding' | 'ambush' | 'retreat' | 'stunned' | 'sabotage_lamp' | 'siege_lamp'
     this.state = "stalk";
     this.stateTimer = 0;
     this.hidingObstacle = null;
@@ -26,6 +26,9 @@ class ShizuneAI {
     this.retreatTarget = { x: 0, y: 0 };
     this.isDarkHunting = false;
     this.lampSabotageCooldown = 6.0;
+    this.safeZoneCampTime = 0;
+    this.siegeFireCooldown = 0;
+    this.siegeShotIndex = 0;
 
     // A* 寻路缓存与反卡死监控
     this.path = [];
@@ -74,6 +77,9 @@ class ShizuneAI {
     this.hidingObstacle = null;
     this.targetLamp = null;
     this.lampSabotageCooldown = 6.0;
+    this.safeZoneCampTime = 0;
+    this.siegeFireCooldown = 0;
+    this.siegeShotIndex = 0;
     this.isDarkHunting = false;
     this.path = [];
     this.pathRecalcTimer = 0;
@@ -153,6 +159,7 @@ class ShizuneAI {
     this.stateTimer = Math.max(0, this.stateTimer - dt);
     this.ambushCooldown = Math.max(0, this.ambushCooldown - dt);
     this.lampSabotageCooldown = Math.max(0, this.lampSabotageCooldown - dt);
+    this.siegeFireCooldown = Math.max(0, this.siegeFireCooldown - dt);
     this.pathRecalcTimer = Math.max(0, this.pathRecalcTimer - dt);
     this.flankSwitchTimer -= dt;
     if (this.flankSwitchTimer <= 0) {
@@ -177,9 +184,19 @@ class ShizuneAI {
     }
 
     // 当前玩家是否身处点亮的复古神社行灯保护区内（站在灯范围内关灯，绝不提升雫音攻击欲望！）
-    const playerInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(player.x, player.y) : false;
+    const playerLitLamp = this.map.getLitLampCovering ? this.map.getLitLampCovering(player.x, player.y) : null;
+    const playerInLitLamp = !!playerLitLamp;
     const shizuneInLitLamp = this.map.getLitLampCovering ? !!this.map.getLitLampCovering(this.x, this.y) : false;
     const lampCalmingMult = playerInLitLamp || shizuneInLitLamp ? 0.78 : 1.0;
+
+    // 反赖安全区机制：累计玩家待在任意安全区范围内的时间，超过 30 秒触发「远程狐火连射压制模式」！
+    if (playerInLitLamp) {
+      this.safeZoneCampTime += dt;
+    } else {
+      // 离开安全区后较快衰减（约 6 秒归零，防止进出边缘反复卡秒刷机制）
+      this.safeZoneCampTime = Math.max(0, this.safeZoneCampTime - dt * 5.0);
+    }
+    const campSiegeActive = playerInLitLamp && this.safeZoneCampTime >= 30.0;
 
     // 阶段难度加成（00:00 -> 06:00 平滑提升）
     const hour = gameState.dawnProgress * 6;
@@ -327,10 +344,52 @@ class ShizuneAI {
           }
         : null;
 
+    // 若玩家呆在安全区超过 30 秒，且雫音未处于眩晕/撤退状态，立即切入「远程狐火炮击模式 (siege_lamp)」！
+    if (campSiegeActive && this.state !== "retreat" && this.state !== "stunned" && this.state !== "siege_lamp") {
+      this.state = "siege_lamp";
+      this.hidingObstacle = null;
+      this.targetLamp = playerLitLamp;
+      this.siegeFireCooldown = Math.min(this.siegeFireCooldown, 0.45);
+      this.path = [];
+      this.pathRecalcTimer = 0;
+    }
+
     // =========================================================================
-    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 行灯压制与偷灭 + 反卡墙）
+    // 机敏猎手状态机（全面接入 A* 寻路 + 绕后包抄 + 关灯狂猎 + 行灯压制/偷灭/远程狐火炮击 + 反卡墙）
     // =========================================================================
-    if (this.state === "stalk") {
+    if (this.state === "siege_lamp") {
+      // 玩家离开安全区，或这盏灯已经被狐火打灭，立刻结束炮击恢复追猎！
+      if (!playerInLitLamp || !playerLitLamp || !playerLitLamp.lit) {
+        this.targetLamp = null;
+        this.state = "stalk";
+        this.path = [];
+      } else {
+        // 保持在安全区外围最佳射程（235~340px）高速游走拉扯，并频繁释放狐火弹幕（交替瞄准玩家与行灯本体！）
+        const curDistToLamp = Math.hypot(this.x - playerLitLamp.x, this.y - playerLitLamp.y);
+        const orbitAng = Math.atan2(this.y - playerLitLamp.y, this.x - playerLitLamp.x) + this.flankSide * 0.55;
+        const desiredR = 265;
+        const tx = Math.max(this.map.minX + 44, Math.min(this.map.maxX - 44, playerLitLamp.x + Math.cos(orbitAng) * desiredR));
+        const ty = Math.max(this.map.minY + 44, Math.min(this.map.maxY - 44, playerLitLamp.y + Math.sin(orbitAng) * desiredR));
+
+        if (curDistToLamp > 370) {
+          this._navigateTo(tx, ty, baseSpeed * 1.28, dt, avoidBeam, 0.25);
+        } else {
+          this._navigateTo(tx, ty, baseSpeed * 0.96, dt, avoidBeam, 0.3);
+        }
+        this.facingAngle = Math.atan2(player.y - this.y, player.x - this.x);
+
+        // 在射程（< 440px）内，每 2.1 秒频繁发射一波蓝色狐火（偶发直瞄灯、奇发瞄准玩家，逼玩家走位或直接打灭行灯！）
+        if (curDistToLamp < 440 && this.siegeFireCooldown <= 0 && gameState.spawnBlueFireVolley) {
+          const aimLamp = this.siegeShotIndex % 2 === 1;
+          this.siegeShotIndex += 1;
+          const aimX = aimLamp ? playerLitLamp.x : player.x;
+          const aimY = aimLamp ? playerLitLamp.y : player.y;
+          const count = hour >= 3 ? 4 : 3;
+          gameState.spawnBlueFireVolley(this.x, this.y, aimX, aimY, count);
+          this.siegeFireCooldown = Math.max(1.55, 2.35 - hour * 0.1);
+        }
+      }
+    } else if (this.state === "stalk") {
       // 若地图上有玩家未守着的亮灯，雫音会找机会悄悄潜过去把灯吹灭！
       if (this.lampSabotageCooldown <= 0 && !lit && Math.random() < dt * 0.55) {
         const lamp = this._pickLampToExtinguish(player);

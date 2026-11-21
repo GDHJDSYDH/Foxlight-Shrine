@@ -116,12 +116,12 @@ class ShrineMap {
       { id: "puddle_6", x: 1370, y: 1100, rx: 66, ry: 44, rot: 0.2 }
     ];
 
-    // 4 盏可交互复古神社行灯（按住 E / 手机按钮 1.5s 点亮，降低范围内雫音攻击欲望；雫音可悄悄熄灭）
+    // 4 盏可交互复古神社行灯（按住 E / 手机按钮 1.5s 点亮，降低范围内雫音攻击欲望；被狐火击中将熄灭并封锁 20 秒）
     this.vintageLamps = [
-      { id: "lamp_nw", name: "西北行灯", x: 470, y: 455, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
-      { id: "lamp_ne", name: "东北行灯", x: 1330, y: 455, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
-      { id: "lamp_sw", name: "西南行灯", x: 470, y: 865, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 },
-      { id: "lamp_se", name: "东南行灯", x: 1330, y: 865, radius: 185, lit: false, progress: 0, extinguishCooldown: 0 }
+      { id: "lamp_nw", name: "西北行灯", x: 470, y: 455, radius: 185, lit: false, progress: 0, lockTimer: 0 },
+      { id: "lamp_ne", name: "东北行灯", x: 1330, y: 455, radius: 185, lit: false, progress: 0, lockTimer: 0 },
+      { id: "lamp_sw", name: "西南行灯", x: 470, y: 865, radius: 185, lit: false, progress: 0, lockTimer: 0 },
+      { id: "lamp_se", name: "东南行灯", x: 1330, y: 865, radius: 185, lit: false, progress: 0, lockTimer: 0 }
     ];
 
     for (const o of this.obstacles) {
@@ -449,7 +449,16 @@ class ShrineMap {
       const lamp = this.vintageLamps[i];
       lamp.lit = i === startIdx;
       lamp.progress = lamp.lit ? 1 : 0;
-      lamp.extinguishCooldown = 0;
+      lamp.lockTimer = 0;
+    }
+  }
+
+  // 每帧更新行灯封锁冷却倒计时
+  updateInteractables(dt) {
+    for (const lamp of this.vintageLamps) {
+      if (lamp.lockTimer > 0) {
+        lamp.lockTimer = Math.max(0, lamp.lockTimer - dt);
+      }
     }
   }
 
@@ -480,12 +489,12 @@ class ShrineMap {
     return null;
   }
 
-  // 查找玩家身边可交互（熄灭状态）的复古灯
+  // 查找玩家身边可交互（熄灭且未被狐火封锁）的复古灯
   getInteractableLampNear(x, y, maxDist = 78) {
     let best = null;
     let bestD = maxDist;
     for (const lamp of this.vintageLamps) {
-      if (lamp.lit) continue;
+      if (lamp.lit || lamp.lockTimer > 0) continue;
       const d = Math.hypot(x - lamp.x, y - lamp.y);
       if (d < bestD) {
         bestD = d;
@@ -569,9 +578,9 @@ class ShrineMap {
       this._fillRoundRect(ctx, -16, -14, 34, 34, 6);
 
       // 复古木框和纸行灯主体
-      ctx.fillStyle = "#3b221a";
+      ctx.fillStyle = lamp.lockTimer > 0 ? "#1f2a40" : "#3b221a";
       this._fillRoundRect(ctx, -17, -17, 34, 34, 6);
-      ctx.strokeStyle = lamp.lit ? "#e8a84a" : "#6c5046";
+      ctx.strokeStyle = lamp.lit ? "#e8a84a" : lamp.lockTimer > 0 ? "#4fd8ff" : "#6c5046";
       ctx.lineWidth = 2.2;
       ctx.strokeRect(-15, -15, 30, 30);
 
@@ -582,6 +591,10 @@ class ShrineMap {
         coreGrad.addColorStop(0.6, "#ffbe52");
         coreGrad.addColorStop(1, "#c76822");
         ctx.fillStyle = coreGrad;
+      } else if (lamp.lockTimer > 0) {
+        // 被蓝色狐火熄灭并封印期间：内部泛冷蓝幽光
+        const lockPulse = 0.5 + Math.sin(timeSec * 6) * 0.25;
+        ctx.fillStyle = `rgba(54, 158, 224, ${lockPulse.toFixed(2)})`;
       } else {
         ctx.fillStyle = "#242836";
       }
@@ -597,8 +610,22 @@ class ShrineMap {
       ctx.lineTo(10, 0);
       ctx.stroke();
 
+      // 被狐火击灭封锁 20 秒倒计时提示
+      if (!lamp.lit && lamp.lockTimer > 0) {
+        ctx.fillStyle = "rgba(10, 18, 36, 0.88)";
+        this._fillRoundRect(ctx, -46, -44, 92, 20, 10);
+        ctx.strokeStyle = "rgba(79, 216, 255, 0.72)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = "#9aeaff";
+        ctx.font = "bold 11px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`狐火封印 ${Math.ceil(lamp.lockTimer)}s`, 0, -34);
+      }
+
       // 正在充能点燃时的环形进度条
-      if (!lamp.lit && lamp.progress > 0.01) {
+      if (!lamp.lit && lamp.lockTimer <= 0 && lamp.progress > 0.01) {
         ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
         ctx.lineWidth = 4;
         ctx.beginPath();
@@ -612,8 +639,8 @@ class ShrineMap {
         ctx.stroke();
       }
 
-      // 玩家靠近熄灭灯时显示按键提示气泡
-      if (!lamp.lit && lamp.id === nearLampId) {
+      // 玩家靠近熄灭且未封锁的灯时显示按键提示气泡
+      if (!lamp.lit && lamp.lockTimer <= 0 && lamp.id === nearLampId) {
         ctx.fillStyle = "rgba(12, 18, 34, 0.86)";
         this._fillRoundRect(ctx, -56, -46, 112, 22, 11);
         ctx.strokeStyle = "rgba(246, 196, 83, 0.7)";

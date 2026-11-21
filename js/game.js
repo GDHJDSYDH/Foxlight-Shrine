@@ -740,13 +740,17 @@
         }
       }
 
-      // 1.5. 复古神社行灯互动（PC 长按 E / 手机长按点灯按钮 1.5s 点亮）
+      // 1.5. 复古神社行灯互动与封锁倒计时更新（PC 长按 E / 手机长按点灯按钮 1.5s 点亮；被狐火击灭期间 20 秒不可点亮）
+      this.map.updateInteractables(dt);
       this.nearLamp = this.map.getInteractableLampNear(this.player.x, this.player.y, 78);
       if (this.ui.mobInteractBtn) {
         this.ui.mobInteractBtn.classList.toggle("hidden", !this.nearLamp);
       }
       for (const lamp of this.map.vintageLamps) {
-        if (lamp.lit) continue;
+        if (lamp.lit || lamp.lockTimer > 0) {
+          if (lamp.lockTimer > 0) lamp.progress = 0;
+          continue;
+        }
         if (this.nearLamp && lamp.id === this.nearLamp.id && this.input.isInteractHeld()) {
           lamp.progress = Math.min(1, lamp.progress + dt / 1.5);
           if (lamp.progress >= 1) {
@@ -886,6 +890,39 @@
               maxLife: 0.24,
               color: "#57d8ff",
               size: 2.5
+            });
+          }
+          continue;
+        }
+
+        // 命中点亮的复古行灯：直接熄灭并封锁 20 秒不可点亮！
+        let hitLamp = null;
+        for (const lamp of this.map.vintageLamps) {
+          if (!lamp.lit) continue;
+          if (Math.hypot(fb.x - lamp.x, fb.y - lamp.y) < 22 + fb.radius) {
+            hitLamp = lamp;
+            break;
+          }
+        }
+        if (hitLamp) {
+          this.blueFireballs.splice(i, 1);
+          hitLamp.lit = false;
+          hitLamp.progress = 0;
+          hitLamp.lockTimer = 20.0;
+          this.sound.playLampState(false);
+          this.sound.playBatteryShock();
+          this.showToast(`${hitLamp.name} 被狐火熄灭（20秒内无法点亮）！`, true);
+          for (let k = 0; k < 12; k++) {
+            const a = (Math.PI * 2 * k) / 12;
+            this.particles.push({
+              x: hitLamp.x,
+              y: hitLamp.y,
+              vx: Math.cos(a) * 95,
+              vy: Math.sin(a) * 95,
+              life: 0.42,
+              maxLife: 0.42,
+              color: "#5ce2ff",
+              size: 3.4
             });
           }
           continue;
