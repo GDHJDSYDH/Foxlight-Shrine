@@ -166,19 +166,34 @@ class InputController {
 
     if (mobInteractBtn) {
       const startHold = (e) => {
-        e.preventDefault();
+        if (e.cancelable) e.preventDefault();
         e.stopPropagation();
         this.mobileInteractHeld = true;
         mobInteractBtn.classList.add("holding");
+        try {
+          if (e.pointerId !== undefined && mobInteractBtn.setPointerCapture) {
+            mobInteractBtn.setPointerCapture(e.pointerId);
+          }
+        } catch (_err) {}
       };
-      const endHold = () => {
+      const endHold = (e) => {
+        if (e && e.cancelable) e.preventDefault();
         this.mobileInteractHeld = false;
         mobInteractBtn.classList.remove("holding");
       };
       mobInteractBtn.addEventListener("pointerdown", startHold);
       mobInteractBtn.addEventListener("pointerup", endHold);
       mobInteractBtn.addEventListener("pointercancel", endHold);
-      mobInteractBtn.addEventListener("pointerleave", endHold);
+      mobInteractBtn.addEventListener("touchstart", startHold, { passive: false });
+      mobInteractBtn.addEventListener("touchend", endHold, { passive: false });
+      mobInteractBtn.addEventListener("touchcancel", endHold, { passive: false });
+      mobInteractBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+    }
+
+    // 防止在手机微信/QQ内置浏览器中长按摇杆或按钮时误弹“保存图片/发送给好友”系统菜单
+    const mobRoot = document.getElementById("mobileControls");
+    if (mobRoot) {
+      mobRoot.addEventListener("contextmenu", (e) => e.preventDefault());
     }
   }
 
