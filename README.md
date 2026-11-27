@@ -4,7 +4,7 @@
 
 一款支持 **PC 电脑与手机浏览器** 的 2D 俯视角手电筒潜行生存网页小游戏，部署于 GitHub Pages，即开即玩。
 
-👉 **在线游玩（GitHub Pages）**：https://gdhjdsydh.github.io/foxlight-shrine/
+👉 **在线游玩（GitHub Pages）**：https://gdhjdsydh.github.io/Foxlight-Shrine/
 
 ---
 
